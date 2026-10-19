@@ -1,6 +1,6 @@
-# FMGE Lecture Telegram Bot
+# FMGE Lecture Telegram Bot (MR.DIY)
 
-Python (aiogram 3) + PostgreSQL + (optional) Redis.
+Python (aiogram 3) + PostgreSQL.
 
 ## Setup
 1. Copy `.env.example` to `.env` and fill `BOT_TOKEN`, `ADMIN_IDS`, `CHANNEL_ID`.
@@ -11,7 +11,15 @@ Python (aiogram 3) + PostgreSQL + (optional) Redis.
 ## Admin
 - `/admin` for commands.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
-- Content is forwarded from `CHANNEL_ID` (no external storage).
+- `/reorder <subject_slug>` to sort by channel sequence.
+- Content is forwarded from `CHANNEL_ID`.
 
-## Free hosting
-Render/Koyeb free tier via webhook mode; DB on Supabase free; or Oracle Cloud Always Free VM with polling.
+## Deploy on Render
+1. Push repo to GitHub.
+2. Render → New → Blueprint → select repo (uses `render.yaml`).
+3. Set env vars: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL` (Supabase/Neon free Postgres), `CHANNEL_ID`.
+4. Render sets `RENDER_EXTERNAL_URL` → webhook auto-configured. Health check at `/health`.
+5. Make bot admin in your channel/group.
+
+## Free hosting alternatives
+Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.

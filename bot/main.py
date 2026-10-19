@@ -60,7 +60,11 @@ async def run_webhook():
         data = await request.json()
         await dp.feed_webhook_update(bot, data)
         return web.Response(text="ok")
+    async def health(request):
+        return web.Response(text="ok")
     app.router.add_post("/", handle_webhook)
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, settings.host, settings.port)

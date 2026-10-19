@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: fmge-lecture-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bot.main
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: PREMIUM_PRICE_INR
+        value: "499"

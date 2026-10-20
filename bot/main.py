@@ -44,7 +44,20 @@ async def run_polling():
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = build_dispatcher()
     await on_startup(bot)
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"])
+    await bot.delete_webhook(drop_pending_updates=True)
+    # Keep a tiny health endpoint for hosts (e.g. Northflank) that expect a port.
+    if settings.port:
+        app = web.Application()
+        async def health(request):
+            return web.Response(text="ok")
+        app.router.add_get("/", health)
+        app.router.add_get("/health", health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, settings.host, settings.port)
+        await site.start()
+        logger.info("Health server running on %s:%s", settings.host, settings.port)
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"], drop_pending_updates=True)
 
 
 async def run_webhook():

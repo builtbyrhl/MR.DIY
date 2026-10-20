@@ -21,5 +21,14 @@ Python (aiogram 3) + PostgreSQL.
 4. Render sets `RENDER_EXTERNAL_URL` → webhook auto-configured. Health check at `/health`.
 5. Make bot admin in your channel/group.
 
+## Deploy on Northflank
+1. Push repo to GitHub (already done).
+2. Northflank → New Service → "Deploy from GitHub repo".
+3. Build type: Buildpacks (or Dockerfile). Start command: `python -m bot.main` (or rely on `Procfile`).
+4. Set environment variables: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, and optionally `WEBHOOK_URL`/`PORT`.
+5. If using polling: set service type to Worker (no HTTP port/health check).
+6. If using webhook: set `WEBHOOK_URL` to your Northflank public URL and keep health check at `/health`.
+7. Deploy and check logs for "DB initialized" and polling start.
+
 ## Free hosting alternatives
 Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.

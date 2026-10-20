@@ -74,7 +74,14 @@ async def run_webhook():
 
 
 def main():
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except Exception as exc:
+        logging.getLogger(__name__).error("Invalid configuration: %s", exc)
+        raise SystemExit(1)
+    if not settings.bot_token:
+        logging.getLogger(__name__).error("BOT_TOKEN is required")
+        raise SystemExit(1)
     if settings.is_webhook:
         asyncio.run(run_webhook())
     else:

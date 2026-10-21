@@ -5,7 +5,6 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from bot.db.ingestion_repo import (
-    add_course,
     approve_batch,
     get_batch,
     get_batch_items,
@@ -15,7 +14,9 @@ from bot.db.ingestion_repo import (
     set_item_course,
     set_item_number,
     skip_item,
+    upsert_course,
 )
+from bot.config import get_settings
 from bot.db.repo import get_subject
 from bot.errors import ApprovedBatchError
 from bot.services.auth import require_admin
@@ -73,7 +74,10 @@ async def _course_line(session, item) -> str:
         return "course: missing"
     destination = course.destination_chat_id or "destination not set"
     topic = course.topic_id if course.topic_id is not None else "topic not set"
-    return f"course: {course.year} / {course.name} -> {destination} (topic {topic})"
+    subject = getattr(course, "subject", None)
+    subject_name = subject.name if subject else "?"
+    label = f"{course.year} / {course.name}" if course.year else course.name
+    return f"course: {subject_name} / {label} -> {destination} (topic {topic})"
 
 
 @router.message(Command("review"))
@@ -273,37 +277,52 @@ async def addcourse_cmd(message: Message, session):
         return
     raw = message.text.replace("/addcourse", "", 1).strip()
     parts = [part.strip() for part in raw.split("|")]
-    if len(parts) < 4:
+    if len(parts) < 1 or not parts[0]:
         await message.answer(
-            "Usage: /addcourse <year>|<subject_slug>|<teacher/course>|<aliases>|[destination_chat]|[topic_id]\n"
-            "Example: /addcourse 1st Year|anatomy|Dr A|dr a,anatomy a|-1001234567890|12"
+            "Usage: /addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]\n"
+            "Example: /addcourse anatomy|Anatomy|anatomy,anat|-1001234567890|12"
         )
         return
 
-    year, subject_slug, name, aliases = parts[0], parts[1], parts[2], parts[3]
+    subject_slug = parts[0]
     subject = await get_subject(session, subject_slug)
     if not subject:
-        await message.answer(f"Subject '{subject_slug}' not found. Use /subjects or create it first.")
+        await message.answer(
+            f"Subject '{subject_slug}' not found. Use /subjects to see the available subjects.\n"
+            "Usage: /addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]"
+        )
         return
 
-    destination = parts[4] if len(parts) > 4 and parts[4] else None
+    name = parts[1] if len(parts) > 1 and parts[1] else subject.name
+    aliases = parts[2] if len(parts) > 2 and parts[2] else subject.slug
+    destination = parts[3] if len(parts) > 3 and parts[3] else ""
+    topic_raw = parts[4] if len(parts) > 4 else ""
+
     topic_id = None
-    if len(parts) > 5 and parts[5]:
-        if not parts[5].isdigit():
+    if topic_raw:
+        if not topic_raw.isdigit():
             await message.answer("Topic ID must be a number.")
             return
-        topic_id = int(parts[5])
+        topic_id = int(topic_raw)
 
-    course = await add_course(
+    if not destination:
+        destination = get_settings().destination_group_id or ""
+    destination = destination or None
+
+    course, created = await upsert_course(
         session,
-        year=year,
         subject_id=subject.id,
         name=name,
         aliases=aliases,
         destination_chat_id=destination,
         topic_id=topic_id,
     )
-    await message.answer(f"Added course #{course.id}: {year} / {subject.name} / {name}")
+    verb = "Added" if created else "Updated"
+    topic = course.topic_id if course.topic_id is not None else "not set"
+    target = course.destination_chat_id or "destination not set"
+    await message.answer(
+        f"{verb} course #{course.id}: {subject.name} / {course.name} -> {target} (topic {topic})"
+    )
 
 
 @router.message(Command("courses"))
@@ -318,8 +337,11 @@ async def courses_cmd(message: Message, session):
     for course in courses:
         destination = course.destination_chat_id or "destination not set"
         topic = course.topic_id if course.topic_id is not None else "topic not set"
+        subject = getattr(course, "subject", None)
+        subject_name = subject.name if subject else "?"
+        label = f"{course.year} / {course.name}" if course.year else course.name
         lines.append(
-            f"#{course.id} {course.year} / {course.name} "
+            f"#{course.id} {subject_name} / {label} "
             f"[{course.aliases or 'no aliases'}] -> {destination} (topic {topic})"
         )
     await _reply_lines(message, lines)

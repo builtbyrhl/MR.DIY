@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy import case, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from bot.db.models import Course, SystemSetting, UploadBatch, UploadItem
 from bot.errors import ApprovedBatchError
@@ -165,35 +166,56 @@ async def approve_batch(session: AsyncSession, batch_id: int, admin_id: int) -> 
 
 # ---------- Courses ----------
 async def list_courses(session: AsyncSession) -> list[Course]:
-    res = await session.execute(select(Course).order_by(Course.year, Course.name))
+    res = await session.execute(
+        select(Course)
+        .options(selectinload(Course.subject))
+        .order_by(Course.year, Course.name)
+    )
     return list(res.scalars().all())
 
 
 async def get_course(session: AsyncSession, course_id: int) -> Optional[Course]:
-    return await session.get(Course, course_id)
+    res = await session.execute(
+        select(Course).options(selectinload(Course.subject)).where(Course.id == course_id)
+    )
+    return res.scalar_one_or_none()
 
 
-async def add_course(
+async def upsert_course(
     session: AsyncSession,
-    year: str,
     subject_id: int,
     name: str,
-    aliases: str,
+    aliases: str = "",
+    year: str = "",
     destination_chat_id: Optional[str] = None,
     topic_id: Optional[int] = None,
-) -> Course:
-    course = Course(
-        year=year,
-        subject_id=subject_id,
-        name=name,
-        aliases=aliases,
-        destination_chat_id=destination_chat_id,
-        topic_id=topic_id,
+) -> tuple[Course, bool]:
+    """Create or update a subject course.
+
+    Courses are keyed by (subject, name). Only the values supplied by the
+    caller are overwritten, so re-running the command never wipes an
+    existing topic/destination or a legacy year value.
+    """
+    res = await session.execute(
+        select(Course).where(Course.subject_id == subject_id, Course.name == name)
     )
-    session.add(course)
+    course = res.scalar_one_or_none()
+    created = course is None
+    if course is None:
+        course = Course(subject_id=subject_id, name=name, year=year or "")
+        session.add(course)
+    else:
+        if year:
+            course.year = year
+    if aliases:
+        course.aliases = aliases
+    if destination_chat_id is not None:
+        course.destination_chat_id = destination_chat_id
+    if topic_id is not None:
+        course.topic_id = topic_id
     await session.commit()
     await session.refresh(course)
-    return course
+    return course, created
 
 
 def _recompute_item_status(item: UploadItem) -> None:

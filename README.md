@@ -18,8 +18,10 @@ Python (aiogram 3) + PostgreSQL.
 1. BotFather → `/setprivacy` → **Disable** (required to read forwarded videos in groups).
 2. Add the bot to your private **Upload Inbox** group.
 3. Set `UPLOAD_INBOX_CHAT_ID` (numeric like `-100123...` or `@username`).
-4. Add courses:
-   `/addcourse 1st Year|anatomy|Dr A|dr a,anatomy a|-100123...|12`
+4. Add courses (one per subject topic of the Med Lounge forum):
+   `/addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]`
+   Example: `/addcourse anatomy|Anatomy|anatomy,anat|-100123...|12`
+   `name`, `aliases`, `destination_chat` and `topic_id` are optional; the destination falls back to `DESTINATION_GROUP_ID`. Re-running the same command updates the existing course (e.g. to set a topic id).
 5. Forward lectures into the inbox. Each upload is stored in a daily batch. The bot stays silent per upload; use `/review`.
 6. Review:
    - `/review` — recent batches

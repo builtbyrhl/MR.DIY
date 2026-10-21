@@ -30,7 +30,7 @@ async def admin_panel(message: Message):
         "/grant <user_id> [days]\n"
         "/stats\n\n"
         "Upload catalogue:\n"
-        "/addcourse <year>|<subject_slug>|<name>|<aliases>|[dest]|[topic]\n"
+        "/addcourse <subject_slug>|<name>|[aliases]|[dest]|[topic]\n"
         "/courses\n"
         "/review\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"

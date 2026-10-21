@@ -34,7 +34,7 @@ async def seeded_course(session):
     await session.refresh(subject)
 
     course = Course(
-        year="1st Year",
+        year="",
         subject_id=subject.id,
         name="Dr A Anatomy",
         aliases="dr a,anatomy a",

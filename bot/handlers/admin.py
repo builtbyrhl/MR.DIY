@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, ReplyParameters
 from aiogram.filters import Command
 
 from bot.config import get_settings
@@ -9,6 +11,7 @@ from bot.db.repo import grant_premium
 from bot.db.session import get_session_factory
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def is_admin(user_id: int) -> bool:
@@ -39,15 +42,30 @@ async def admin_panel(message: Message):
 
 @router.message(Command("whereami"))
 async def whereami_cmd(message: Message):
-    if not is_admin(message.from_user.id):
+    sender = getattr(message, "from_user", None)
+    if sender is None or not is_admin(sender.id):
+        logger.warning(
+            "Ignored /whereami: sender is not an admin (chat=%s sender=%s)",
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(sender, "id", None),
+        )
         return
     chat = message.chat
     thread_id = getattr(message, "message_thread_id", None)
     title = getattr(chat, "title", None) or getattr(chat, "type", "unknown")
-    await message.answer(
+    text = (
         f"chat.id: {chat.id}\n"
         f"message_thread_id: {thread_id if thread_id is not None else 'None'}\n"
         f"chat title: {title}"
+    )
+    # Reply to the command message itself so the answer stays in the same
+    # forum topic (a plain chat message would land in the General topic).
+    await message.answer(
+        text,
+        reply_parameters=ReplyParameters(
+            message_id=message.message_id,
+            allow_sending_without_reply=True,
+        ),
     )
 
 

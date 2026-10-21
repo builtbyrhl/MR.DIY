@@ -32,7 +32,22 @@ async def admin_panel(message: Message):
         "/review\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
-        "/pause · /resume"
+        "/pause · /resume\n"
+        "/whereami"
+    )
+
+
+@router.message(Command("whereami"))
+async def whereami_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    chat = message.chat
+    thread_id = getattr(message, "message_thread_id", None)
+    title = getattr(chat, "title", None) or getattr(chat, "type", "unknown")
+    await message.answer(
+        f"chat.id: {chat.id}\n"
+        f"message_thread_id: {thread_id if thread_id is not None else 'None'}\n"
+        f"chat title: {title}"
     )
 
 

@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, User as TgUser
 
 from bot.config import get_settings
+from bot.utils.telegram import chat_matches
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -15,6 +16,12 @@ class ThrottlingMiddleware(BaseMiddleware):
         self._last: Dict[int, float] = {}
 
     async def __call__(self, handler: Callable[[TelegramObject, dict], Awaitable], event: TelegramObject, data: dict) -> any:
+        chat = getattr(event, "chat", None)
+        if chat is None:
+            chat = getattr(getattr(event, "message", None), "chat", None)
+        if chat is not None and chat_matches(get_settings().upload_inbox_chat_id, chat):
+            return await handler(event, data)
+
         user: TgUser | None = data.get("event_from_user")
         if user is not None:
             now = time.monotonic()

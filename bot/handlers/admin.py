@@ -25,7 +25,14 @@ async def admin_panel(message: Message):
         "/addlecture <subject_slug>|<title>|<channel_msg_id>|[premium]\n"
         "/reorder <subject_slug>\n"
         "/grant <user_id> [days]\n"
-        "/stats"
+        "/stats\n\n"
+        "Upload catalogue:\n"
+        "/addcourse <year>|<subject_slug>|<name>|<aliases>|[dest]|[topic]\n"
+        "/courses\n"
+        "/review\n"
+        "/batch <id> · /dryrun <id> · /approve <id>\n"
+        "/skip <item> · /keep <item> · /retry <item>\n"
+        "/pause · /resume"
     )
 
 

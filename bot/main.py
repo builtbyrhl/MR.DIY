@@ -14,7 +14,7 @@ from bot.db.session import init_db
 from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
 
-from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, admin, channel
+from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, admin, channel, review, ingest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def build_dispatcher() -> Dispatcher:
     dp.callback_query.middleware(ThrottlingMiddleware())
     # routers
     for r in (start.router, subjects.router, lectures.router, bookmarks.router,
-              progress.router, search.router, premium.router, admin.router, channel.router):
+              progress.router, search.router, premium.router, admin.router, channel.router, review.router, ingest.router):
         dp.include_router(r)
     return dp
 

@@ -18,6 +18,8 @@ class Settings:
     ))
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
     channel_id: str = field(default_factory=lambda: os.getenv("CHANNEL_ID", ""))  # source channel for lectures
+    upload_inbox_chat_id: str = field(default_factory=lambda: os.getenv("UPLOAD_INBOX_CHAT_ID", ""))
+    destination_group_id: str = field(default_factory=lambda: os.getenv("DESTINATION_GROUP_ID", ""))
     webhook_url: str = field(default_factory=lambda: os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", ""))
     webhook_secret: str = field(default_factory=lambda: os.getenv("WEBHOOK_SECRET", "secret"))
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))

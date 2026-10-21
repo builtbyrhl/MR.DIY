@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -93,3 +105,75 @@ class Payment(Base):
     provider_payment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class Course(Base):
+    __tablename__ = "courses"
+    __table_args__ = (UniqueConstraint("subject_id", "name", name="uq_course_subject_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    year: Mapped[str] = mapped_column(String(32))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(128))
+    aliases: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated
+    destination_chat_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    subject: Mapped["Subject"] = relationship()
+
+
+class UploadBatch(Base):
+    __tablename__ = "upload_batches"
+    __table_args__ = (Index("ix_upload_batches_source_date", "source_chat_id", "batch_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger)
+    batch_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(32), default="open")  # open/approved
+    approved_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    items: Mapped[list["UploadItem"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
+
+
+class UploadItem(Base):
+    __tablename__ = "upload_items"
+    __table_args__ = (
+        UniqueConstraint("source_chat_id", "source_message_id", name="uq_upload_source_message"),
+        Index("ix_upload_items_status", "status"),
+        Index("ix_upload_items_batch", "batch_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("upload_batches.id", ondelete="CASCADE"))
+    source_chat_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_id: Mapped[int] = mapped_column(BigInteger)
+    forward_from_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    forward_from_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    media_type: Mapped[str] = mapped_column(String(16))  # video/document
+    file_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    file_unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    raw_caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    lecture_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="received")
+    review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    duplicate_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    duplicate_of_item_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("upload_items.id", ondelete="SET NULL"), nullable=True
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    batch: Mapped["UploadBatch"] = relationship(back_populates="items")
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)

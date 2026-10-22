@@ -10,9 +10,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
 from bot.config import get_settings
-from bot.db.session import init_db
+from bot.db.session import get_session_factory, init_db
 from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.services.catalog import sync_published_uploads_to_catalog
 
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, admin, channel, review, ingest
 
@@ -37,6 +38,9 @@ def build_dispatcher() -> Dispatcher:
 async def on_startup(bot: Bot):
     await init_db()
     logger.info("DB initialized")
+    async with get_session_factory()() as session:
+        created = await sync_published_uploads_to_catalog(session)
+    logger.info("Student catalogue synced (%s new lectures)", created)
 
 
 async def run_polling():

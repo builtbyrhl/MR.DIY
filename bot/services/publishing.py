@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -9,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.config import get_settings
 from bot.db.ingestion_repo import get_batch, get_batch_items
 from bot.db.models import Course, UploadBatch, UploadItem
+from bot.services.catalog import project_upload_to_lecture
+
+logger = logging.getLogger(__name__)
 
 CAPTION_LIMIT = 1024
 
@@ -83,6 +87,18 @@ async def _mark_failed(
     return PublishResult(item_id=item.id, status=FAILED, reason=reason)
 
 
+async def _sync_student_catalog(
+    session: AsyncSession, item: UploadItem
+) -> None:
+    """Best-effort projection; sending already succeeded at this point."""
+    try:
+        await project_upload_to_lecture(session, item)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception("Failed to project published upload #%s", item.id)
+
+
 async def _publish_item(
     session: AsyncSession,
     bot: Bot,
@@ -96,6 +112,7 @@ async def _publish_item(
         )
 
     if item.publication_status == PUBLISHED or item.published_message_id is not None:
+        await _sync_student_catalog(session, item)
         return PublishResult(
             item_id=item.id,
             status=ALREADY_PUBLISHED,
@@ -184,6 +201,7 @@ async def _publish_item(
     item.published_message_id = message_id
     item.error = None
     await session.commit()
+    await _sync_student_catalog(session, item)
     return PublishResult(
         item_id=item.id,
         status=PUBLISHED,

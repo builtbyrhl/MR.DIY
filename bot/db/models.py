@@ -54,9 +54,19 @@ class Subject(Base):
 
 class Lecture(Base):
     __tablename__ = "lectures"
+    __table_args__ = (
+        Index(
+            "uq_lectures_source_upload_item",
+            "source_upload_item_id",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    source_upload_item_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("upload_items.id", ondelete="SET NULL"), nullable=True
+    )
     title: Mapped[str] = mapped_column(String(256))
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)  # comma-separated

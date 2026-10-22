@@ -1,6 +1,17 @@
 from __future__ import annotations
 
+import logging
+from typing import Optional
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bot.db.models import Course, Lecture, UploadItem
 from bot.db.repo import list_subjects
+
+logger = logging.getLogger(__name__)
+
+PUBLISHED = "published"
 
 DEFAULT_SUBJECTS = [
     ("anatomy", "Anatomy", "🫀", 1),
@@ -33,3 +44,78 @@ async def ensure_subjects(session):
     for slug, name, emoji, order in DEFAULT_SUBJECTS:
         session.add(Subject(slug=slug, name=name, emoji=emoji, order=order))
     await session.commit()
+
+
+async def project_upload_to_lecture(
+    session: AsyncSession, item: UploadItem
+) -> tuple[Optional[Lecture], bool]:
+    """Create or update the student lecture for a published upload.
+
+    The caller owns the transaction. The unique source link makes this
+    idempotent even if publishing or startup backfill runs repeatedly.
+    """
+    if item.publication_status != PUBLISHED and item.published_message_id is None:
+        return None, False
+    if item.course_id is None:
+        return None, False
+
+    course = await session.get(Course, item.course_id)
+    if course is None:
+        return None, False
+
+    lecture = await session.scalar(
+        select(Lecture).where(Lecture.source_upload_item_id == item.id)
+    )
+    created = lecture is None
+    if lecture is None:
+        lecture = Lecture(
+            subject_id=course.subject_id,
+            source_upload_item_id=item.id,
+            title="",
+        )
+        session.add(lecture)
+
+    raw_title = (item.title or item.file_name or "").strip()
+    fallback_number = (
+        item.lecture_number if item.lecture_number is not None else item.id
+    )
+    lecture.subject_id = course.subject_id
+    lecture.title = (raw_title or f"Lecture {fallback_number}")[:256]
+
+    if item.lecture_number is not None:
+        lecture.order = item.lecture_number
+    elif created:
+        with session.no_autoflush:
+            max_order = await session.scalar(
+                select(func.coalesce(func.max(Lecture.order), 0)).where(
+                    Lecture.subject_id == course.subject_id
+                )
+            )
+        lecture.order = (max_order or 0) + 1
+
+    await session.flush()
+    return lecture, created
+
+
+async def sync_published_uploads_to_catalog(session: AsyncSession) -> int:
+    """Project all already-published uploads, including legacy publications."""
+    result = await session.execute(
+        select(UploadItem).where(
+            or_(
+                UploadItem.publication_status == PUBLISHED,
+                UploadItem.published_message_id.is_not(None),
+            )
+        )
+    )
+    created = 0
+    for item in result.scalars().all():
+        try:
+            lecture, was_created = await project_upload_to_lecture(session, item)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("Failed to project upload item #%s", item.id)
+            continue
+        if lecture is not None and was_created:
+            created += 1
+    return created

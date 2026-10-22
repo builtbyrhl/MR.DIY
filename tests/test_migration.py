@@ -60,3 +60,73 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
     assert row.status == "classified"
 
     await engine.dispose()
+
+
+async def test_startup_migration_links_legacy_lectures_without_data_loss(
+    tmp_path, monkeypatch
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/legacy-lectures.db")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE lectures (
+                    id INTEGER PRIMARY KEY,
+                    subject_id INTEGER NOT NULL,
+                    title VARCHAR(256) NOT NULL,
+                    description TEXT,
+                    tags VARCHAR(256),
+                    channel_message_id INTEGER,
+                    duration_sec INTEGER,
+                    is_premium BOOLEAN NOT NULL DEFAULT 0,
+                    "order" INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO lectures
+                    (id, subject_id, title, channel_message_id, is_premium, "order")
+                VALUES
+                    (7, 1, 'Legacy Biochemistry Lecture', 456, 0, 7)
+                """
+            )
+        )
+
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+    await db_session.init_db()
+    await db_session.init_db()
+
+    async with engine.connect() as connection:
+        columns = await connection.run_sync(
+            lambda conn: {
+                column["name"]
+                for column in inspect(conn).get_columns("lectures")
+            }
+        )
+        indexes = await connection.run_sync(
+            lambda conn: {
+                index["name"]
+                for index in inspect(conn).get_indexes("lectures")
+            }
+        )
+        row = (
+            await connection.execute(
+                text(
+                    'SELECT id, title, channel_message_id, source_upload_item_id '
+                    'FROM lectures WHERE id = 7'
+                )
+            )
+        ).one()
+
+    assert "source_upload_item_id" in columns
+    assert "uq_lectures_source_upload_item" in indexes
+    assert row.id == 7
+    assert row.title == "Legacy Biochemistry Lecture"
+    assert row.channel_message_id == 456
+    assert row.source_upload_item_id is None
+
+    await engine.dispose()

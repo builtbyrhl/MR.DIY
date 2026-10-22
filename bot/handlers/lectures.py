@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 
 from bot.config import get_settings
+from bot.db.models import UploadItem
 from bot.db.repo import get_lecture, is_watched, mark_watched, add_bookmark, remove_bookmark, is_premium
 from bot.keyboards.inline import lecture_actions_kb
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 # track last subject for "back"
 _last_subject: dict[int, str] = {}
@@ -49,21 +53,63 @@ async def open_lecture(cb: CallbackQuery, session, db_user, bot):
 async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
     lid = int(cb.data.split(":")[1])
     lec = await get_lecture(session, lid)
-    if not lec or not lec.channel_message_id:
+    if not lec:
         await cb.answer("Media not available", show_alert=True)
         return
-    settings = get_settings()
-    if not settings.channel_id:
-        await cb.answer("Channel not configured", show_alert=True)
-        return
-    try:
-        await bot.copy_message(
-            chat_id=cb.from_user.id,
-            from_chat_id=settings.channel_id,
-            message_id=lec.channel_message_id,
+
+    premium = await is_premium(db_user)
+    if lec.is_premium and not premium:
+        await cb.answer(
+            "Premium lecture. Upgrade to watch.",
+            show_alert=True,
         )
-    except Exception as e:
-        await cb.answer(f"Failed: {e}", show_alert=True)
+        return
+
+    upload = None
+    if lec.source_upload_item_id is not None:
+        upload = await session.get(UploadItem, lec.source_upload_item_id)
+        if upload is None or not upload.file_id:
+            await cb.answer("Media not available", show_alert=True)
+            return
+    elif not lec.channel_message_id:
+        await cb.answer("Media not available", show_alert=True)
+        return
+
+    try:
+        if upload is not None:
+            if upload.media_type == "video":
+                await bot.send_video(
+                    chat_id=cb.from_user.id,
+                    video=upload.file_id,
+                    caption=lec.title,
+                    parse_mode=None,
+                )
+            elif upload.media_type == "document":
+                await bot.send_document(
+                    chat_id=cb.from_user.id,
+                    document=upload.file_id,
+                    caption=lec.title,
+                    parse_mode=None,
+                )
+            else:
+                await cb.answer("Media not available", show_alert=True)
+                return
+        else:
+            settings = get_settings()
+            if not settings.channel_id:
+                await cb.answer("Channel not configured", show_alert=True)
+                return
+            await bot.copy_message(
+                chat_id=cb.from_user.id,
+                from_chat_id=settings.channel_id,
+                message_id=lec.channel_message_id,
+            )
+    except Exception:
+        logger.exception("Failed to send lecture #%s", lid)
+        await cb.answer(
+            "Could not send this lecture. Please try again.",
+            show_alert=True,
+        )
         return
     await mark_watched(session, db_user.id, lid)
     await cb.answer("Sent! Marked as watched ✅")

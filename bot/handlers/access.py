@@ -107,9 +107,10 @@ def _parse_target_id(message: Message) -> int | None:
     if len(parts) != 2:
         return None
     try:
-        return int(parts[1])
+        user_id = int(parts[1])
     except ValueError:
         return None
+    return user_id if user_id > 0 else None
 
 
 @router.message(Command("access"))
@@ -229,6 +230,8 @@ async def access_decision_cb(cb: CallbackQuery, session, bot):
     try:
         _, action, raw_user_id = cb.data.split(":", 2)
         user_id = int(raw_user_id)
+        if user_id <= 0:
+            raise ValueError
     except (ValueError, AttributeError):
         await cb.answer("Invalid access request.", show_alert=True)
         return

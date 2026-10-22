@@ -26,7 +26,7 @@ from bot.services.ingestion import (
     resume_ingestion,
     retry_item,
 )
-from bot.services.publishing import publish_batch
+from bot.services.publishing import publish_batch, unlock_publish_state
 
 router = Router()
 
@@ -183,6 +183,24 @@ async def publish_cmd(message: Message, session, bot: Bot):
     for failure in result.failures:
         lines.append(f"#{failure.item_id}: {failure.reason}")
     await _reply_lines(message, lines)
+
+
+@router.message(Command("unlockpublish"))
+async def unlockpublish_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/unlockpublish")
+    if not args or not args[0].isdigit():
+        await message.answer("Usage: /unlockpublish <item_id>")
+        return
+    item, error = await unlock_publish_state(session, int(args[0]))
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(
+        f"Item #{item.id} unlocked. Verify the destination topic before "
+        "running /publish again."
+    )
 
 
 @router.message(Command("skip"))

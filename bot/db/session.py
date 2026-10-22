@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
 from bot.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _engine = None
 _session_factory = None
@@ -25,6 +29,46 @@ _USER_ACCESS_NEW_COLUMNS = (
 )
 
 _USER_ACCESS_INDEX = "ix_users_access_status"
+
+_OPEN_BATCH_INDEX = "uq_upload_batches_open_source_date"
+
+
+def ensure_open_batch_unique_index(connection) -> None:
+    """Allow only one open upload batch per source chat and date.
+
+    Older databases may already contain duplicate open batches. In that case
+    the index is skipped and a warning is logged instead of deleting or
+    merging existing rows.
+    """
+    inspector = inspect(connection)
+    if not inspector.has_table("upload_batches"):
+        return
+
+    table = connection.dialect.identifier_preparer.quote("upload_batches")
+    duplicates = connection.execute(
+        text(
+            f"SELECT source_chat_id, batch_date, COUNT(*) AS total "
+            f"FROM {table} WHERE status = 'open' "
+            "GROUP BY source_chat_id, batch_date HAVING COUNT(*) > 1 LIMIT 1"
+        )
+    ).first()
+    if duplicates is not None:
+        logger.warning(
+            "Skipping %s: duplicate open upload batches exist for "
+            "source_chat_id=%s batch_date=%s",
+            _OPEN_BATCH_INDEX,
+            duplicates.source_chat_id,
+            duplicates.batch_date,
+        )
+        return
+
+    index = connection.dialect.identifier_preparer.quote(_OPEN_BATCH_INDEX)
+    connection.execute(
+        text(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {index} "
+            f"ON {table} (source_chat_id, batch_date) WHERE status = 'open'"
+        )
+    )
 
 
 def ensure_upload_item_columns(connection) -> None:
@@ -159,3 +203,4 @@ async def init_db():
         await conn.run_sync(ensure_upload_item_columns)
         await conn.run_sync(ensure_lecture_columns)
         await conn.run_sync(ensure_user_access_columns)
+        await conn.run_sync(ensure_open_batch_unique_index)

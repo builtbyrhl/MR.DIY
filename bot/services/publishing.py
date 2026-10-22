@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from aiogram import Bot
+from sqlalchemy import or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import get_settings
@@ -17,9 +18,15 @@ logger = logging.getLogger(__name__)
 CAPTION_LIMIT = 1024
 
 PUBLISHED = "published"
+PUBLISHING = "publishing"
 ALREADY_PUBLISHED = "already_published"
 SKIPPED = "skipped"
 FAILED = "failed"
+
+UNCERTAIN_REASON = (
+    "a previous publish attempt did not complete. Verify the destination "
+    "topic for a duplicate, then use /unlockpublish before retrying."
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,31 @@ async def _mark_failed(
     return PublishResult(item_id=item.id, status=FAILED, reason=reason)
 
 
+async def _claim_for_publish(
+    session: AsyncSession, item: UploadItem
+) -> bool:
+    """Atomically move an unpublished item into the publishing state.
+
+    The conditional UPDATE prevents two concurrent /publish runs from sending
+    the same item. Items left in this state by a crash are never auto-resent.
+    """
+    result = await session.execute(
+        update(UploadItem)
+        .where(
+            UploadItem.id == item.id,
+            UploadItem.published_message_id.is_(None),
+            or_(
+                UploadItem.publication_status.is_(None),
+                UploadItem.publication_status.notin_((PUBLISHED, PUBLISHING)),
+            ),
+        )
+        .values(publication_status=PUBLISHING, error=None)
+    )
+    await session.commit()
+    await session.refresh(item)
+    return result.rowcount == 1
+
+
 async def _sync_student_catalog(
     session: AsyncSession, item: UploadItem
 ) -> None:
@@ -117,6 +149,13 @@ async def _publish_item(
             item_id=item.id,
             status=ALREADY_PUBLISHED,
             message_id=item.published_message_id,
+        )
+
+    if item.publication_status == PUBLISHING:
+        return PublishResult(
+            item_id=item.id,
+            status=FAILED,
+            reason=UNCERTAIN_REASON,
         )
 
     if not item.file_id:
@@ -164,6 +203,26 @@ async def _publish_item(
             f"topic id is not configured for course #{course.id}",
         )
 
+    if not await _claim_for_publish(session, item):
+        if item.publication_status == PUBLISHED or item.published_message_id is not None:
+            await _sync_student_catalog(session, item)
+            return PublishResult(
+                item_id=item.id,
+                status=ALREADY_PUBLISHED,
+                message_id=item.published_message_id,
+            )
+        if item.publication_status == PUBLISHING:
+            return PublishResult(
+                item_id=item.id,
+                status=FAILED,
+                reason=UNCERTAIN_REASON,
+            )
+        return PublishResult(
+            item_id=item.id,
+            status=FAILED,
+            reason="item could not be claimed for publishing; refresh and retry.",
+        )
+
     caption = _build_caption(item)
     try:
         if item.media_type == "video":
@@ -172,6 +231,7 @@ async def _publish_item(
                 video=item.file_id,
                 caption=caption,
                 parse_mode=None,
+                protect_content=True,
                 message_thread_id=course.topic_id,
             )
         else:
@@ -180,6 +240,7 @@ async def _publish_item(
                 document=item.file_id,
                 caption=caption,
                 parse_mode=None,
+                protect_content=True,
                 message_thread_id=course.topic_id,
             )
     except Exception as exc:
@@ -235,6 +296,22 @@ async def publish_item(
         )
 
     return await _publish_item(session, bot, item)
+
+
+async def unlock_publish_state(
+    session: AsyncSession, item_id: int
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Clear a stale publishing claim after an admin has checked the topic."""
+    item = await session.get(UploadItem, item_id)
+    if item is None:
+        return None, "Item not found."
+    if item.publication_status != PUBLISHING:
+        return None, "Item is not in an uncertain publishing state."
+    item.publication_status = None
+    item.error = None
+    await session.commit()
+    await session.refresh(item)
+    return item, None
 
 
 async def publish_batch(

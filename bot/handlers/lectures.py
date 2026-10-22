@@ -96,6 +96,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
                     video=upload.file_id,
                     caption=lec.title,
                     parse_mode=None,
+                    protect_content=True,
                 )
             elif upload.media_type == "document":
                 await bot.send_document(
@@ -103,6 +104,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
                     document=upload.file_id,
                     caption=lec.title,
                     parse_mode=None,
+                    protect_content=True,
                 )
             else:
                 await cb.answer("Media not available", show_alert=True)
@@ -116,6 +118,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
                 chat_id=cb.from_user.id,
                 from_chat_id=settings.channel_id,
                 message_id=lec.channel_message_id,
+                protect_content=True,
             )
     except Exception:
         logger.exception("Failed to send lecture #%s", lid)

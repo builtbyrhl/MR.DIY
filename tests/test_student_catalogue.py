@@ -261,6 +261,7 @@ async def test_watch_sends_projected_video_file_id_and_marks_progress(
     assert kwargs["chat_id"] == user.id
     assert kwargs["video"] == "projected-video-file"
     assert kwargs["caption"] == "Biochemistry Lecture 5 - Vitamins"
+    assert kwargs["protect_content"] is True
     bot.copy_message.assert_not_awaited()
 
     watched = await session.scalar(
@@ -298,6 +299,7 @@ async def test_watch_sends_projected_document_file_id(session, biochemistry):
     assert kwargs["chat_id"] == user.id
     assert kwargs["document"] == "projected-document-file"
     assert kwargs["caption"] == "Biochemistry Lecture 6 - Notes"
+    assert kwargs["protect_content"] is True
     bot.send_video.assert_not_awaited()
 
 
@@ -329,6 +331,7 @@ async def test_watch_keeps_legacy_channel_copy_path(
         chat_id=user.id,
         from_chat_id="-100777",
         message_id=321,
+        protect_content=True,
     )
     bot.send_video.assert_not_awaited()
 

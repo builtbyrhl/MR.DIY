@@ -390,6 +390,18 @@ async def test_middleware_does_not_block_upload_inbox(db, monkeypatch):
     handler.assert_awaited_once()
 
 
+async def test_access_commands_reject_non_positive_user_ids(session):
+    bot = AsyncMock()
+
+    message = _message(123, "/approveuser -5")
+    await approve_user_cmd(message, session, bot)
+
+    message.answer.assert_awaited_once()
+    assert "Usage" in message.answer.await_args.args[0]
+    assert await session.get(User, -5) is None
+    bot.send_message.assert_not_awaited()
+
+
 async def test_lecture_open_and_watch_recheck_access(session):
     subject = Subject(slug="anatomy", name="Anatomy", emoji="A", order=1)
     session.add(subject)

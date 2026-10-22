@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -142,7 +143,17 @@ class Course(Base):
 
 class UploadBatch(Base):
     __tablename__ = "upload_batches"
-    __table_args__ = (Index("ix_upload_batches_source_date", "source_chat_id", "batch_date"),)
+    __table_args__ = (
+        Index("ix_upload_batches_source_date", "source_chat_id", "batch_date"),
+        Index(
+            "uq_upload_batches_open_source_date",
+            "source_chat_id",
+            "batch_date",
+            unique=True,
+            sqlite_where=text("status = 'open'"),
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_chat_id: Mapped[int] = mapped_column(BigInteger)

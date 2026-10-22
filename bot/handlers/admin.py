@@ -5,6 +5,7 @@ import logging
 from aiogram import Router, F
 from aiogram.types import Message, ReplyParameters
 from aiogram.filters import Command
+from sqlalchemy.exc import IntegrityError
 
 from bot.config import get_settings
 from bot.db.repo import grant_premium
@@ -40,6 +41,7 @@ async def admin_panel(message: Message):
         "/review\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
         "/publish <id>\n"
+        "/unlockpublish <item> — after verifying an uncertain publish\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
         "/pause · /resume\n"
         "/whereami"
@@ -80,14 +82,19 @@ async def add_subject(message: Message, session):
     if not is_admin(message.from_user.id):
         return
     parts = [p.strip() for p in message.text.replace("/addsubject", "", 1).strip().split("|")]
-    if len(parts) < 2:
+    if len(parts) < 2 or not parts[0] or not parts[1]:
         await message.answer("Usage: /addsubject slug|name|emoji")
         return
     slug, name = parts[0], parts[1]
     emoji = parts[2] if len(parts) > 2 else "📘"
     from bot.db.models import Subject
     session.add(Subject(slug=slug, name=name, emoji=emoji))
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        await message.answer(f"Subject '{slug}' already exists.")
+        return
     await message.answer(f"Added subject {name}")
 
 
@@ -96,10 +103,18 @@ async def add_lecture(message: Message, session):
     if not is_admin(message.from_user.id):
         return
     parts = [p.strip() for p in message.text.replace("/addlecture", "", 1).strip().split("|")]
-    if len(parts) < 3:
+    if len(parts) < 3 or not parts[0] or not parts[1]:
         await message.answer("Usage: /addlecture subject_slug|title|channel_msg_id|[premium]")
         return
-    slug, title, msg_id = parts[0], parts[1], int(parts[2])
+    slug, title = parts[0], parts[1]
+    try:
+        msg_id = int(parts[2])
+    except ValueError:
+        await message.answer("Channel message ID must be a number.")
+        return
+    if msg_id <= 0:
+        await message.answer("Channel message ID must be a positive number.")
+        return
     premium = (parts[3].lower() == "premium") if len(parts) > 3 else False
     from bot.db.repo import get_subject
     subj = await get_subject(session, slug)
@@ -123,8 +138,22 @@ async def grant_cmd(message: Message, session):
     if len(args) < 2:
         await message.answer("Usage: /grant <user_id> [days]")
         return
-    uid = int(args[1])
-    days = int(args[2]) if len(args) > 2 else 365
+    try:
+        uid = int(args[1])
+        days = int(args[2]) if len(args) > 2 else 365
+    except ValueError:
+        await message.answer("Usage: /grant <user_id> [days]")
+        return
+    if uid <= 0 or days <= 0:
+        await message.answer("User ID and days must be positive numbers.")
+        return
+    from bot.db.models import User
+    user = await session.get(User, uid)
+    if user is None:
+        await message.answer(
+            f"User {uid} was not found. They must start the bot first."
+        )
+        return
     await grant_premium(session, uid, days)
     await message.answer(f"Granted premium to {uid} for {days} days")
 

@@ -12,6 +12,7 @@ Python (aiogram 3) + PostgreSQL.
 - `/admin` for commands.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
 - `/reorder <subject_slug>` to sort by channel sequence.
+- `/grant <user_id> [days]` only works for users who have already started the bot.
 - Content is forwarded from `CHANNEL_ID`.
 
 ## Milestone 1: upload inbox + review + publishing
@@ -22,17 +23,31 @@ Python (aiogram 3) + PostgreSQL.
    `/addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]`
    Example: `/addcourse anatomy|Anatomy|anatomy,anat|-100123...|12`
    `name`, `aliases`, `destination_chat` and `topic_id` are optional; the destination falls back to `DESTINATION_GROUP_ID`. Re-running the same command updates the existing course (e.g. to set a topic id).
-5. Forward lectures into the inbox. Each upload is stored in a daily batch. The bot stays silent per upload; use `/review`.
+5. Forward lectures into the inbox. Uploads are grouped into one **open daily batch per inbox chat**. The bot stays silent per upload; use `/review`.
 6. Review:
    - `/review` — recent batches
    - `/batch <id>` / `/dryrun <id>` — sorted preview
    - `/approve <id>` — approve and lock the batch (does not publish)
    - `/publish <id>` — publish an approved batch to each course destination/topic
+   - `/unlockpublish <item>` — clear an uncertain publish state after manually checking the destination topic
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
    - `/pause` / `/resume`
 7. Duplicates and uncertain year/teacher/number go to `needs_review`; nothing is assumed automatically.
-8. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items.
+8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day.
+9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items.
+10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, the item is left in `publishing` and is **not auto-resent**. Verify the destination topic, then use `/unlockpublish <item>` and `/publish <id>` deliberately.
+
+## Content protection
+Student media is sent with Telegram's `protect_content=True`, and the same flag is used when publishing to course topics and copying legacy channel lectures. This disables native forwarding/saving inside Telegram only. It is **not DRM**: users can still screen-record or redistribute files, and Telegram can remove the flag on some content. Do not describe it as copy-proof.
+
+## Backup and restore
+Take a backup before deploying schema changes.
+- PostgreSQL: `pg_dump "$DATABASE_URL" --format=custom --file=mrdiy-backup.dump`
+- Restore only into an empty/new database: `pg_restore --dbname="$DATABASE_URL" --clean --if-exists mrdiy-backup.dump`
+- SQLite (local/dev): stop the bot, copy the `.db` file, and keep the copy outside the repo.
+
+The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
 
 ## Deploy on Render
 1. Push repo to GitHub.
@@ -52,3 +67,11 @@ Python (aiogram 3) + PostgreSQL.
 
 ## Free hosting alternatives
 Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.
+
+## Deployment checklist
+1. Run `python -m pytest` and `python -m compileall bot`.
+2. Back up the production database.
+3. Deploy the reviewed commit, then restart the bot.
+4. Check startup logs for migration errors and confirm `/health` responds in webhook mode.
+5. Open `/admin`, `/review`, and `/stats` as an admin. Do not publish a real batch until the destination course/topic is verified.
+6. After deployment, confirm approved/unapproved users behave as expected with `/start`.

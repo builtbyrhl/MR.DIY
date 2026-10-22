@@ -1,3 +1,5 @@
+import logging
+
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -129,6 +131,98 @@ async def test_startup_migration_preserves_existing_user_access(
     assert row.id == 999
     assert row.access_status == "approved"
     assert row.access_decided_at is None
+
+    await engine.dispose()
+
+
+async def test_open_batch_migration_adds_unique_index(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/legacy-batches.db")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE upload_batches (
+                    id INTEGER PRIMARY KEY,
+                    source_chat_id BIGINT NOT NULL,
+                    batch_date DATE NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    approved_by BIGINT,
+                    approved_at DATETIME,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+    await db_session.init_db()
+    await db_session.init_db()
+
+    async with engine.connect() as connection:
+        indexes = await connection.run_sync(
+            lambda conn: {
+                index["name"]
+                for index in inspect(conn).get_indexes("upload_batches")
+            }
+        )
+
+    assert "uq_upload_batches_open_source_date" in indexes
+
+    await engine.dispose()
+
+
+async def test_open_batch_migration_skips_duplicate_open_batches(
+    tmp_path, monkeypatch, caplog
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/duplicate-batches.db")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE upload_batches (
+                    id INTEGER PRIMARY KEY,
+                    source_chat_id BIGINT NOT NULL,
+                    batch_date DATE NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    approved_by BIGINT,
+                    approved_at DATETIME,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO upload_batches
+                    (id, source_chat_id, batch_date, status)
+                VALUES
+                    (1, -1001, '2026-01-15', 'open'),
+                    (2, -1001, '2026-01-15', 'open')
+                """
+            )
+        )
+
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+    with caplog.at_level(logging.WARNING):
+        await db_session.init_db()
+
+    async with engine.connect() as connection:
+        indexes = await connection.run_sync(
+            lambda conn: {
+                index["name"]
+                for index in inspect(conn).get_indexes("upload_batches")
+            }
+        )
+        count = (
+            await connection.execute(
+                text("SELECT COUNT(*) FROM upload_batches")
+            )
+        ).scalar_one()
+
+    assert "uq_upload_batches_open_source_date" not in indexes
+    assert count == 2
+    assert "duplicate open upload batches" in caplog.text
 
     await engine.dispose()
 

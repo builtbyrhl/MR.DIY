@@ -39,6 +39,7 @@ def test_review_commands_gate_unauthorized_users():
         (review.batch_cmd, "/batch 1"),
         (review.dryrun_cmd, "/dryrun 1"),
         (review.approve_cmd, "/approve 1"),
+        (review.unlockpublish_cmd, "/unlockpublish 1"),
         (review.skip_cmd, "/skip 1"),
         (review.keep_cmd, "/keep 1"),
         (review.retry_cmd, "/retry 1"),

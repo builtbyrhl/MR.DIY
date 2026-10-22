@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock
 from bot.db.ingestion_repo import approve_batch
 from bot.handlers import review
 from bot.services.ingestion import ingest_media
-from bot.services.publishing import publish_batch, publish_item
+from bot.services.publishing import (
+    publish_batch,
+    publish_item,
+    unlock_publish_state,
+)
 
 
 async def _configure_course(session, course, *, destination="-100123", topic=12):
@@ -66,6 +70,7 @@ async def test_video_publishes_to_configured_forum_topic(session, seeded_course)
     assert kwargs["message_thread_id"] == 77
     assert kwargs["caption"] == "Anatomy A Lecture 1"
     assert kwargs["parse_mode"] is None
+    assert kwargs["protect_content"] is True
     bot.send_document.assert_not_awaited()
 
     await session.refresh(item)
@@ -100,6 +105,7 @@ async def test_document_publishes_to_configured_forum_topic(session, seeded_cour
     assert kwargs["message_thread_id"] == 88
     assert kwargs["caption"] == "Anatomy A Lecture 2"
     assert kwargs["parse_mode"] is None
+    assert kwargs["protect_content"] is True
     bot.send_video.assert_not_awaited()
 
     await session.refresh(item)
@@ -330,6 +336,44 @@ async def test_partial_failure_does_not_block_other_items_and_can_retry(
     assert second_item.publication_status == "published"
     assert second_item.published_message_id == 602
     assert second_item.error is None
+
+
+async def test_uncertain_publish_is_not_retried_until_unlocked(
+    session, seeded_course
+):
+    _, course = seeded_course
+    await _configure_course(session, course)
+    item = await _ingest(
+        session,
+        message_id=113,
+        caption="Anatomy A Lecture 13",
+        file_id="uncertain-file-id",
+    )
+    await _approve(session, item)
+
+    item.publication_status = "publishing"
+    await session.commit()
+
+    bot = AsyncMock()
+    result = await publish_item(session, bot, item.id)
+
+    assert result.status == "failed"
+    assert "unlockpublish" in result.reason
+    bot.send_video.assert_not_awaited()
+    await session.refresh(item)
+    assert item.publication_status == "publishing"
+
+    unlocked, error = await unlock_publish_state(session, item.id)
+    assert error is None
+    assert unlocked is not None
+    assert unlocked.publication_status is None
+
+    bot.send_video.return_value = SimpleNamespace(message_id=513)
+    retried = await publish_item(session, bot, item.id)
+
+    assert retried.status == "published"
+    assert retried.message_id == 513
+    bot.send_video.assert_awaited_once()
 
 
 async def test_ingestion_stores_telegram_file_id(session, seeded_course):

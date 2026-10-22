@@ -1,9 +1,11 @@
 import logging
+from datetime import date
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
-from bot.db.models import UploadItem
+from bot.db.models import UploadBatch, UploadItem
 from bot.services.ingestion import ingest_media, parse_caption
 
 
@@ -159,6 +161,44 @@ async def test_approval_blocks_unresolved_items(session, seeded_course):
     ok, text = await approve_batch(session, item.batch_id, 123)
     assert ok is False
     assert "unresolved" in text
+
+
+async def test_only_one_open_batch_per_source_and_date(session):
+    batch_date = date(2026, 1, 15)
+    session.add(
+        UploadBatch(
+            source_chat_id=-1001, batch_date=batch_date, status="open"
+        )
+    )
+    await session.commit()
+    session.add(
+        UploadBatch(
+            source_chat_id=-1001, batch_date=batch_date, status="open"
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()
+
+    session.add_all(
+        [
+            UploadBatch(
+                source_chat_id=-1001, batch_date=batch_date, status="approved"
+            ),
+            UploadBatch(
+                source_chat_id=-1001, batch_date=batch_date, status="approved"
+            ),
+        ]
+    )
+    await session.commit()
+
+    count = await session.scalar(
+        select(func.count(UploadBatch.id)).where(
+            UploadBatch.source_chat_id == -1001,
+            UploadBatch.batch_date == batch_date,
+        )
+    )
+    assert count == 3
 
 
 async def test_upload_after_approval_creates_new_batch(session, seeded_course):

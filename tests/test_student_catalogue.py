@@ -15,6 +15,7 @@ from bot.db.repo import (
 )
 from bot.handlers.lectures import watch_lecture
 from bot.handlers.subjects import open_subject
+from bot.services.access import APPROVED
 from bot.services.catalog import (
     project_upload_to_lecture,
     sync_published_uploads_to_catalog,
@@ -49,6 +50,7 @@ async def _student(session, user_id=9001):
         full_name="Student",
         is_premium=False,
         is_admin=False,
+        access_status=APPROVED,
     )
     session.add(user)
     await session.commit()

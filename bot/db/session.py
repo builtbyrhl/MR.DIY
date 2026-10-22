@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
@@ -16,6 +16,15 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
 )
 
 _LECTURE_SOURCE_UPLOAD_INDEX = "uq_lectures_source_upload_item"
+
+_USER_ACCESS_NEW_COLUMNS = (
+    ("access_status", String(16)),
+    ("access_requested_at", DateTime()),
+    ("access_decided_at", DateTime()),
+    ("access_decided_by", BigInteger()),
+)
+
+_USER_ACCESS_INDEX = "ix_users_access_status"
 
 
 def ensure_upload_item_columns(connection) -> None:
@@ -84,6 +93,49 @@ def ensure_lecture_columns(connection) -> None:
     )
 
 
+def ensure_user_access_columns(connection) -> None:
+    """Add persistent student access state to an existing users table.
+
+    New users default to pending in the ORM. Existing users are backfilled to
+    approved so deploying this migration does not lock out current students.
+    """
+    inspector = inspect(connection)
+    if not inspector.has_table("users"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("users")}
+    table = connection.dialect.identifier_preparer.quote("users")
+    if_not_exists = "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
+    for name, column_type in _USER_ACCESS_NEW_COLUMNS:
+        if name in existing:
+            continue
+        definition = str(
+            CreateColumn(Column(name, column_type, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
+
+    if "access_status" not in existing:
+        # Only legacy rows touched by this one-time migration are grandfathered.
+        # Rows with no state later are treated as pending by the access policy.
+        connection.execute(
+            text(
+                f"UPDATE {table} SET access_status = 'approved' "
+                "WHERE access_status IS NULL"
+            )
+        )
+    index = connection.dialect.identifier_preparer.quote(_USER_ACCESS_INDEX)
+    connection.execute(
+        text(
+            f"CREATE INDEX IF NOT EXISTS {index} "
+            f"ON {table} (access_status)"
+        )
+    )
+
+
 def get_engine():
     global _engine
     if _engine is None:
@@ -106,3 +158,4 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(ensure_upload_item_columns)
         await conn.run_sync(ensure_lecture_columns)
+        await conn.run_sync(ensure_user_access_columns)

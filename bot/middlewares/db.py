@@ -3,8 +3,57 @@ from __future__ import annotations
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 
+from bot.config import get_settings
 from bot.db.session import get_session_factory
 from bot.db.repo import get_or_create_user
+from bot.keyboards.inline import request_access_kb
+from bot.services.access import has_library_access
+from bot.utils.telegram import chat_matches
+
+_ACCESS_EXEMPT_COMMANDS = {"start", "help"}
+_ACCESS_REQUIRED_TEXT = "Library access required. Use /start to request access."
+
+
+def _command_name(text: str | None) -> str | None:
+    if not isinstance(text, str) or not text.startswith("/"):
+        return None
+    return text.split(maxsplit=1)[0][1:].split("@", 1)[0].lower()
+
+
+def _event_chat(event: TelegramObject):
+    return getattr(event, "chat", None) or getattr(
+        getattr(event, "message", None), "chat", None
+    )
+
+
+def _is_callback(event: TelegramObject) -> bool:
+    return hasattr(event, "data")
+
+
+def _is_access_exempt(event: TelegramObject) -> bool:
+    if _is_callback(event) and getattr(event, "data", None) == "request_access":
+        return True
+
+    chat = _event_chat(event)
+    if chat is not None and chat_matches(
+        get_settings().upload_inbox_chat_id, chat
+    ):
+        return True
+
+    text = getattr(event, "text", None)
+    if text == "❓ Help":
+        return True
+    return _command_name(text) in _ACCESS_EXEMPT_COMMANDS
+
+
+async def _deny_access(event: TelegramObject) -> None:
+    if _is_callback(event):
+        await event.answer(_ACCESS_REQUIRED_TEXT, show_alert=True)
+        return
+    await event.answer(
+        _ACCESS_REQUIRED_TEXT,
+        reply_markup=request_access_kb(),
+    )
 
 
 class DbMiddleware(BaseMiddleware):
@@ -14,7 +63,19 @@ class DbMiddleware(BaseMiddleware):
             data["session"] = session
             tg_user = data.get("event_from_user")
             if tg_user is not None:
-                data["db_user"] = await get_or_create_user(session, tg_user)
-            result = await handler(event, data)
+                db_user = await get_or_create_user(session, tg_user)
+                data["db_user"] = db_user
+                if not _is_access_exempt(event) and not has_library_access(
+                    db_user
+                ):
+                    await _deny_access(event)
+                    await session.commit()
+                    return None
+
+            try:
+                result = await handler(event, data)
+            except Exception:
+                await session.rollback()
+                raise
             await session.commit()
             return result

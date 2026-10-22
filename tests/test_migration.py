@@ -62,6 +62,77 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
     await engine.dispose()
 
 
+async def test_startup_migration_preserves_existing_user_access(
+    tmp_path, monkeypatch
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/legacy-users.db")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    username VARCHAR(64),
+                    full_name VARCHAR(128),
+                    is_premium BOOLEAN NOT NULL DEFAULT 0,
+                    premium_until DATETIME,
+                    is_admin BOOLEAN NOT NULL DEFAULT 0,
+                    streak INTEGER NOT NULL DEFAULT 0,
+                    last_active DATETIME,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO users (id, username, full_name, is_admin)
+                VALUES (999, 'existing_student', 'Existing Student', 0)
+                """
+            )
+        )
+
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+    await db_session.init_db()
+    await db_session.init_db()
+
+    async with engine.connect() as connection:
+        columns = await connection.run_sync(
+            lambda conn: {
+                column["name"]
+                for column in inspect(conn).get_columns("users")
+            }
+        )
+        indexes = await connection.run_sync(
+            lambda conn: {
+                index["name"]
+                for index in inspect(conn).get_indexes("users")
+            }
+        )
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT id, access_status, access_decided_at "
+                    "FROM users WHERE id = 999"
+                )
+            )
+        ).one()
+
+    assert {
+        "access_status",
+        "access_requested_at",
+        "access_decided_at",
+        "access_decided_by",
+    } <= columns
+    assert "ix_users_access_status" in indexes
+    assert row.id == 999
+    assert row.access_status == "approved"
+    assert row.access_decided_at is None
+
+    await engine.dispose()
+
+
 async def test_startup_migration_links_legacy_lectures_without_data_loss(
     tmp_path, monkeypatch
 ):

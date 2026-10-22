@@ -9,6 +9,7 @@ from bot.config import get_settings
 from bot.db.models import UploadItem
 from bot.db.repo import get_lecture, is_watched, mark_watched, add_bookmark, remove_bookmark, is_premium
 from bot.keyboards.inline import lecture_actions_kb
+from bot.services.access import has_library_access
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ _last_subject: dict[int, str] = {}
 
 @router.callback_query(F.data.startswith("lec:"))
 async def open_lecture(cb: CallbackQuery, session, db_user, bot):
+    if not has_library_access(db_user):
+        await cb.answer(
+            "Library access not approved. Use /start to request access.",
+            show_alert=True,
+        )
+        return
     lid = int(cb.data.split(":")[1])
     lec = await get_lecture(session, lid)
     if not lec:
@@ -51,6 +58,12 @@ async def open_lecture(cb: CallbackQuery, session, db_user, bot):
 
 @router.callback_query(F.data.startswith("watch:"))
 async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
+    if not has_library_access(db_user):
+        await cb.answer(
+            "Library access not approved. Use /start to request access.",
+            show_alert=True,
+        )
+        return
     lid = int(cb.data.split(":")[1])
     lec = await get_lecture(session, lid)
     if not lec:

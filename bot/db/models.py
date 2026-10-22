@@ -25,6 +25,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (Index("ix_users_access_status", "access_status"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # telegram user id
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -32,6 +33,12 @@ class User(Base):
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
     premium_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    access_status: Mapped[Optional[str]] = mapped_column(
+        String(16), default="pending", server_default="pending", nullable=True
+    )
+    access_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    access_decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    access_decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     streak: Mapped[int] = mapped_column(Integer, default=0)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -14,6 +14,29 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def request_access_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔓 Request Access", callback_data="request_access")],
+        ]
+    )
+
+
+def access_review_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Approve", callback_data=f"access:approve:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Reject", callback_data=f"access:reject:{user_id}"
+                ),
+            ]
+        ]
+    )
+
+
 def subjects_kb(subjects, page: int = 0, per_page: int = 8) -> InlineKeyboardMarkup:
     start = page * per_page
     chunk = subjects[start:start + per_page]

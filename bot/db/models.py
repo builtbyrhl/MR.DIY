@@ -154,12 +154,15 @@ class UploadItem(Base):
     forward_from_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     media_type: Mapped[str] = mapped_column(String(16))  # video/document
     file_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    file_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     file_unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     raw_caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     lecture_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="received")
+    publication_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     duplicate_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     duplicate_of_item_id: Mapped[Optional[int]] = mapped_column(

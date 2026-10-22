@@ -42,6 +42,7 @@ async def ingest_message(message: Message, session):
             media_type="video" if message.video else "document",
             caption=message.caption,
             file_name=getattr(media, "file_name", None),
+            file_id=getattr(media, "file_id", None),
             file_unique_id=getattr(media, "file_unique_id", None),
             forward_from_chat_id=forward_chat_id,
             forward_from_message_id=forward_message_id,

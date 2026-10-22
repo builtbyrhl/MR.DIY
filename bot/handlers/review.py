@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -26,6 +26,7 @@ from bot.services.ingestion import (
     resume_ingestion,
     retry_item,
 )
+from bot.services.publishing import publish_batch
 
 router = Router()
 
@@ -158,6 +159,30 @@ async def approve_cmd(message: Message, session):
         return
     ok, text = await approve_batch(session, int(args[0]), message.from_user.id)
     await message.answer(text)
+
+
+@router.message(Command("publish"))
+async def publish_cmd(message: Message, session, bot: Bot):
+    if not _authorized(message):
+        return
+    args = _args(message, "/publish")
+    if not args or not args[0].isdigit():
+        await message.answer("Usage: /publish <batch_id>")
+        return
+
+    result = await publish_batch(session, bot, int(args[0]))
+    if result.error:
+        await message.answer(result.error)
+        return
+
+    lines = [
+        f"Batch #{result.batch_id} publish: {result.published} published, "
+        f"{result.already_published} already published, {result.skipped} skipped, "
+        f"{len(result.failures)} failed."
+    ]
+    for failure in result.failures:
+        lines.append(f"#{failure.item_id}: {failure.reason}")
+    await _reply_lines(message, lines)
 
 
 @router.message(Command("skip"))

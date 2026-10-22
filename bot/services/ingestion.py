@@ -151,6 +151,7 @@ async def ingest_media(
     caption: Optional[str],
     file_name: Optional[str],
     file_unique_id: Optional[str],
+    file_id: Optional[str] = None,
     forward_from_chat_id: Optional[int] = None,
     forward_from_message_id: Optional[int] = None,
 ) -> tuple[UploadItem, bool]:
@@ -170,6 +171,7 @@ async def ingest_media(
         forward_from_message_id=forward_from_message_id,
         media_type=media_type,
         file_name=file_name,
+        file_id=file_id,
         file_unique_id=file_unique_id,
         raw_caption=caption,
         title=parsed.title,

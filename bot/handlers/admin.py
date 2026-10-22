@@ -34,6 +34,7 @@ async def admin_panel(message: Message):
         "/courses\n"
         "/review\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
+        "/publish <id>\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
         "/pause · /resume\n"
         "/whereami"

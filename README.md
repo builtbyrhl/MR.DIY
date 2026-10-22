@@ -14,7 +14,7 @@ Python (aiogram 3) + PostgreSQL.
 - `/reorder <subject_slug>` to sort by channel sequence.
 - Content is forwarded from `CHANNEL_ID`.
 
-## Milestone 1: upload inbox + review (no publishing)
+## Milestone 1: upload inbox + review + publishing
 1. BotFather → `/setprivacy` → **Disable** (required to read forwarded videos in groups).
 2. Add the bot to your private **Upload Inbox** group.
 3. Set `UPLOAD_INBOX_CHAT_ID` (numeric like `-100123...` or `@username`).
@@ -26,7 +26,8 @@ Python (aiogram 3) + PostgreSQL.
 6. Review:
    - `/review` — recent batches
    - `/batch <id>` / `/dryrun <id>` — sorted preview
-   - `/approve <id>` — approve only (nothing is published yet)
+   - `/approve <id>` — approve and lock the batch (does not publish)
+   - `/publish <id>` — publish an approved batch to each course destination/topic
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
    - `/pause` / `/resume`

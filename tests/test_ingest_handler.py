@@ -32,7 +32,11 @@ async def test_video_handler_ingests_without_ack(monkeypatch, session, seeded_co
     message = _fake_message(
         chat_id=-1001,
         message_id=40,
-        video=SimpleNamespace(file_name=None, file_unique_id="handler-video"),
+        video=SimpleNamespace(
+            file_name=None,
+            file_id="handler-file-id",
+            file_unique_id="handler-video",
+        ),
         caption="Anatomy A Lecture 40",
     )
 
@@ -41,6 +45,7 @@ async def test_video_handler_ingests_without_ack(monkeypatch, session, seeded_co
     item = await session.scalar(select(UploadItem))
     assert item is not None
     assert item.media_type == "video"
+    assert item.file_id == "handler-file-id"
     assert item.lecture_number == 40
     assert item.status == "classified"
     message.reply.assert_not_awaited()

@@ -216,6 +216,8 @@ class UploadItem(Base):
     teacher_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("teachers.id", ondelete="SET NULL"), nullable=True
     )
+    teacher_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    teacher_review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="received")
     publication_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

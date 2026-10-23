@@ -22,6 +22,7 @@ from bot.db.ingestion_repo import (
     set_setting,
 )
 from bot.db.models import Course, UploadItem
+from bot.db.repo import find_matching_teachers
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,20 @@ LEADING_TITLE_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
+# Teacher extraction is intentionally conservative. A trailing segment is only
+# removed from the title when it is explicitly marked as a teacher or when it
+# matches a teacher in the uniquely identified subject.
+TEACHER_SEPARATOR = re.compile(r"(?:\s*[—–]\s*|\s+\|\s+|\s+--\s+|\s+-\s+)")
+TEACHER_LABEL_PREFIX = re.compile(
+    r"^(?:(?:teacher|faculty)\s*[:\-]\s*|by\s+)", re.IGNORECASE
+)
+TEACHER_HONORIFIC = re.compile(
+    r"^(?:dr|prof|professor|mr|mrs|ms|miss|sir|madam|"
+    r"asst\.?\s+prof(?:essor)?|assoc\.?\s+prof(?:essor)?)\b",
+    re.IGNORECASE,
+)
+COURSE_TOKEN = re.compile(r"\w+", re.UNICODE)
+
 
 @dataclass
 class ParsedCaption:
@@ -43,6 +58,9 @@ class ParsedCaption:
     lecture_number: Optional[int]
     number_ambiguous: bool
     numbers: list[int]
+    teacher_name: Optional[str] = None
+    title_without_teacher: Optional[str] = None
+    teacher_explicit: bool = False
 
 
 def _extract_numbers(text: str) -> list[int]:
@@ -59,6 +77,37 @@ def _extract_numbers(text: str) -> list[int]:
         if number not in numbers:
             numbers.append(number)
     return numbers
+
+
+def _split_teacher(title: str) -> tuple[Optional[str], Optional[str], bool]:
+    """Split a trailing teacher segment from a title.
+
+    Returns ``(title_without_teacher, teacher_name, explicit)``. ``explicit`` is
+    true when the candidate uses a documented label or an honorific, allowing
+    the caller to report an unknown teacher without treating every hyphenated
+    subtitle (for example "Upper Limb") as a failed teacher match.
+    """
+    separators = list(TEACHER_SEPARATOR.finditer(title))
+    if not separators:
+        return None, None, False
+
+    separator = separators[-1]
+    base = title[: separator.start()].strip(" \t-—–:|,;")
+    candidate = title[separator.end() :].strip(" \t-—–:|,;")
+    if not base or not candidate or len(candidate) > 128:
+        return None, None, False
+
+    separator_text = separator.group(0)
+    explicit = any(marker in separator_text for marker in "—–|")
+    label = TEACHER_LABEL_PREFIX.match(candidate)
+    if label:
+        candidate = candidate[label.end() :].strip(" \t-—–:|,;")
+        explicit = True
+    if TEACHER_HONORIFIC.match(candidate):
+        explicit = True
+    if len(candidate) < 2:
+        return None, None, False
+    return base, candidate, explicit
 
 
 def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCaption:
@@ -86,11 +135,20 @@ def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCap
         if cleaned:
             title = cleaned
 
+    title_without_teacher = None
+    teacher_name = None
+    teacher_explicit = False
+    if title:
+        title_without_teacher, teacher_name, teacher_explicit = _split_teacher(title)
+
     return ParsedCaption(
         title=(title or "Untitled")[:256],
         lecture_number=lecture_number,
         number_ambiguous=number_ambiguous,
         numbers=numbers,
+        teacher_name=teacher_name,
+        title_without_teacher=title_without_teacher,
+        teacher_explicit=teacher_explicit,
     )
 
 
@@ -101,13 +159,52 @@ def _course_candidates(course: Course) -> list[str]:
     return [c for c in candidates if len(c.strip()) >= 3]
 
 
+def _match_tokens(text: str) -> list[str]:
+    return COURSE_TOKEN.findall(text.casefold())
+
+
+def _contains_token_phrase(text_tokens: list[str], candidate: str) -> bool:
+    candidate_tokens = _match_tokens(candidate)
+    if not candidate_tokens:
+        return False
+    width = len(candidate_tokens)
+    return any(
+        text_tokens[index : index + width] == candidate_tokens
+        for index in range(len(text_tokens) - width + 1)
+    )
+
+
+def _contains_token_prefix(text_tokens: list[str], candidate: str) -> bool:
+    candidate_tokens = _match_tokens(candidate)
+    if len(candidate_tokens) != 1:
+        return False
+    return any(token.startswith(candidate_tokens[0]) for token in text_tokens)
+
+
 def match_courses(courses: list[Course], text: str) -> list[Course]:
-    folded = text.casefold()
-    matched: list[Course] = []
+    """Match exact course words first, with unique aliases as a safe fallback.
+
+    Whole-token phrase matches prevent ``Physiology`` from matching inside
+    ``Pathophysiology``. A single-token alias such as ``anat`` may match the
+    start of ``Anatomy`` only when no exact course-name/alias match exists.
+    Multiple matches at either level remain ambiguous and are reviewed.
+    """
+    text_tokens = _match_tokens(text)
+    exact: list[Course] = []
+    prefix: list[Course] = []
     for course in courses:
-        if any(candidate.strip().casefold() in folded for candidate in _course_candidates(course)):
-            matched.append(course)
-    return matched
+        candidates = _course_candidates(course)
+        if any(
+            _contains_token_phrase(text_tokens, candidate)
+            for candidate in candidates
+        ):
+            exact.append(course)
+        elif any(
+            _contains_token_prefix(text_tokens, candidate)
+            for candidate in candidates
+        ):
+            prefix.append(course)
+    return exact or prefix
 
 
 async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
@@ -123,6 +220,7 @@ async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
     if item.duplicate_flag:
         reasons.append("suspected duplicate file")
 
+    course = None
     if len(matches) == 0:
         item.course_id = None
         reasons.append("course/year not confidently identified")
@@ -130,15 +228,67 @@ async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
         item.course_id = None
         reasons.append("multiple course matches")
     else:
-        item.course_id = matches[0].id
+        course = matches[0]
+        item.course_id = course.id
         if await clear_teacher_if_subject_mismatch(
-            session, item, matches[0].subject_id
+            session, item, course.subject_id
         ):
             logger.info(
                 "Cleared incompatible teacher from upload item #%s after "
                 "course reclassification",
                 item.id,
             )
+
+    teacher_reason = None
+    auto_teacher_id = None
+    if course is None:
+        if item.teacher_source == "auto":
+            item.teacher_id = None
+            item.teacher_source = None
+        if (
+            parsed.teacher_name
+            and parsed.teacher_explicit
+            and item.teacher_id is None
+        ):
+            teacher_reason = "teacher not resolved: subject not uniquely identified"
+    else:
+        manual_teacher = item.teacher_source == "manual" or (
+            item.teacher_id is not None and item.teacher_source is None
+        )
+        if not manual_teacher:
+            if parsed.teacher_name:
+                teachers = await find_matching_teachers(
+                    session, course.subject_id, parsed.teacher_name
+                )
+                if len(teachers) == 1:
+                    item.teacher_id = teachers[0].id
+                    item.teacher_source = "auto"
+                    auto_teacher_id = teachers[0].id
+                else:
+                    if item.teacher_source == "auto":
+                        item.teacher_id = None
+                        item.teacher_source = None
+                    if len(teachers) > 1:
+                        teacher_reason = (
+                            f"ambiguous teacher: {parsed.teacher_name}"
+                        )
+                    elif parsed.teacher_explicit:
+                        teacher_reason = (
+                            f"teacher not found: {parsed.teacher_name}"
+                        )
+            elif item.teacher_source == "auto":
+                item.teacher_id = None
+                item.teacher_source = None
+
+    item.teacher_review_reason = teacher_reason
+    if teacher_reason:
+        reasons.append(teacher_reason)
+
+    if (
+        parsed.title_without_teacher
+        and (parsed.teacher_explicit or auto_teacher_id is not None)
+    ):
+        item.title = parsed.title_without_teacher[:256]
 
     if parsed.number_ambiguous:
         reasons.append("ambiguous lecture number")
@@ -239,6 +389,7 @@ async def retry_item(session: AsyncSession, item_id: int) -> Optional[UploadItem
     item.status = "received"
     item.error = None
     item.review_reason = None
+    item.teacher_review_reason = None
     if item.file_unique_id:
         duplicate = await find_duplicate_file(
             session, item.file_unique_id, item.id, item.source_chat_id, item.media_type
@@ -262,6 +413,7 @@ async def keep_item(session: AsyncSession, item_id: int) -> Optional[UploadItem]
     item.duplicate_of_item_id = None
     item.status = "received"
     item.review_reason = None
+    item.teacher_review_reason = None
     await session.commit()
     await classify_item(session, item)
     await session.commit()

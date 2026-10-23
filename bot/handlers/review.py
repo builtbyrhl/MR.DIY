@@ -98,6 +98,11 @@ def _item_line(item) -> str:
         flags.append(f"dup of #{item.duplicate_of_item_id}")
     if item.review_reason:
         flags.append(item.review_reason)
+    if (
+        item.teacher_review_reason
+        and item.teacher_review_reason not in (item.review_reason or "")
+    ):
+        flags.append(item.teacher_review_reason)
     suffix = f" | {'; '.join(flags)}" if flags else ""
     return f"#{item.id} [{item.status}] {number} {item.title or 'Untitled'}{suffix}"
 

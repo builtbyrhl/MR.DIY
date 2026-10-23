@@ -61,6 +61,8 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
         "publication_status",
         "published_message_id",
         "teacher_id",
+        "teacher_source",
+        "teacher_review_reason",
     } <= columns
     assert row.id == 1
     assert row.file_unique_id == "existing-unique-id"

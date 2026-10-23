@@ -98,6 +98,24 @@ async def list_teachers(session: AsyncSession, subject_id: int) -> list[Teacher]
     return list(res.scalars().all())
 
 
+async def find_matching_teachers(
+    session: AsyncSession, subject_id: int, name: str
+) -> list[Teacher]:
+    """Return teachers in one subject whose normalized names match exactly."""
+    normalized = normalize_teacher_name(name)
+    if not normalized:
+        return []
+    res = await session.execute(
+        select(Teacher)
+        .where(
+            Teacher.subject_id == subject_id,
+            Teacher.normalized_name == normalized,
+        )
+        .order_by(Teacher.id)
+    )
+    return list(res.scalars().all())
+
+
 async def add_teacher(
     session: AsyncSession, subject_id: int, name: str
 ) -> tuple[Optional[Teacher], Optional[str]]:
@@ -214,7 +232,13 @@ async def set_lecture_teacher(
     if lecture.source_upload_item_id is not None:
         item = await session.get(UploadItem, lecture.source_upload_item_id)
         if item is not None:
+            from bot.db.ingestion_repo import _recompute_item_status
+
             item.teacher_id = teacher_id
+            item.teacher_source = "manual"
+            item.teacher_review_reason = None
+            if item.status in {"classified", "needs_review"}:
+                _recompute_item_status(item)
     await session.commit()
     await session.refresh(lecture)
     return lecture, None

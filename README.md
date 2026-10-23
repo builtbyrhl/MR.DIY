@@ -34,11 +34,37 @@ Python (aiogram 3) + PostgreSQL.
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
    - `/pause` / `/resume`
-7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher metadata is optional and is never guessed from captions.
+7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher metadata is optional and is only assigned when the caption format and an existing subject-scoped teacher match are unambiguous.
 8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day.
 9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items. Teacher assignment remains available because it only changes catalogue metadata.
 10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, the item is left in `publishing` and is **not auto-resent**. Verify the destination topic, then use `/unlockpublish <item>` and `/publish <id>` deliberately.
-11. `/batch` and `/dryrun` show the current teacher assignment for every item.
+11. `/batch` and `/dryrun` show the current teacher assignment and any automatic teacher-matching failure reason for every item.
+
+## Automatic teacher extraction
+Put the teacher at the end of the first caption line. The exact supported format is:
+
+```text
+Lecture 10: Pathophysiology — Dr Sharma
+```
+
+Supported separators (the final separator on the first line is used):
+- em dash: `—` (with or without surrounding spaces) — always treated as a teacher separator
+- en dash: `–` (with or without surrounding spaces) — always treated as a teacher separator
+- spaced pipe: ` | ` — always treated as a teacher separator
+- spaced hyphen: ` - ` — requires a teacher label/honorific, or an exact teacher match, so ordinary subtitles are not misread
+
+Using an em dash, en dash, or pipe with a teacher name that does not exist sends the item to `needs_review` rather than silently leaving the teacher unassigned.
+
+The teacher segment may optionally use a `Teacher:`, `Faculty:`, or `By` prefix, for example `Lecture 10: Pathophysiology — Teacher: Dr Sharma` or `Lecture 10: Pathophysiology — by Dr Sharma`. Teacher names with `Dr`, `Dr.`, `Prof`, `Professor`, `Mr`, `Mrs`, `Ms`, `Miss`, `Sir`, `Madam`, `Asst. Prof`, or `Assoc. Prof` count as explicitly marked teacher segments.
+
+Matching behavior:
+- The course/subject is identified first using whole-word course-name/alias matches. A single-token alias may match the start of a word only when no exact name/alias match exists (for example `anat` → `Anatomy`), so `Physiology` never matches inside `Pathophysiology`. No match or multiple course matches sends the item to `needs_review`.
+- The teacher is then matched by the existing normalized name rules within that single subject. The teacher must already exist; captions never create teacher records.
+- Exactly one matching teacher is required. Unknown or ambiguous explicit teacher segments leave `teacher_id` unset and add a reason such as `teacher not found: Dr Sharma` to `/batch` and `/dryrun`.
+- A trailing plain subtitle that does not match a teacher, such as `Anatomy A Lecture 2 - Upper Limb`, is left in the title and does not block classification.
+- When a teacher is resolved, the teacher segment is removed from the lecture title.
+- If no teacher is specified, the lecture remains under **Teacher not specified**.
+- Manual `/setteacher` and `/setlectureteacher` corrections are marked as manual and are not overwritten by later `/retry` or automatic reclassification. Manually clearing a teacher also survives retries.
 
 ## Teacher-based student navigation
 Students choose `Subject → Teacher → Lecture`. Teacher lists are built dynamically from the published catalogue, with lecture counts per teacher. Teachers are subject-specific: the same person teaching two subjects has one teacher record per subject. Names are normalized (spacing, punctuation, and case) within each subject to prevent duplicates.
@@ -56,7 +82,7 @@ Take a backup before deploying schema changes.
 - Restore only into an empty/new database: `pg_restore --dbname="${DATABASE_URL/+asyncpg/}" --clean --if-exists mrdiy-backup.dump`.
 - SQLite (local/dev): stop the bot, copy the `.db` file, and keep the copy outside the repo.
 
-The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id` columns and indexes without changing row data. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
+The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id`, `teacher_source`, and `teacher_review_reason` columns plus indexes without changing row data. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
 
 ## Deploy on Render
 1. Push repo to GitHub.

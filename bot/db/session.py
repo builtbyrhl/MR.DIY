@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
@@ -18,6 +18,8 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("publication_status", String(32)),
     ("published_message_id", BigInteger()),
     ("teacher_id", Integer()),
+    ("teacher_source", String(16)),
+    ("teacher_review_reason", Text()),
 )
 
 _LECTURE_SOURCE_UPLOAD_INDEX = "uq_lectures_source_upload_item"

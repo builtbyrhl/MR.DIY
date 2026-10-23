@@ -233,6 +233,8 @@ def _recompute_item_status(item: UploadItem) -> None:
         reasons.append("course/year not confidently identified")
     if item.lecture_number is None:
         reasons.append("lecture number missing")
+    if item.teacher_review_reason:
+        reasons.append(item.teacher_review_reason)
     item.status = "needs_review" if reasons else "classified"
     item.review_reason = "; ".join(reasons) if reasons else None
 
@@ -253,6 +255,8 @@ async def clear_teacher_if_subject_mismatch(
         return False
 
     item.teacher_id = None
+    item.teacher_source = None
+    item.teacher_review_reason = None
     if item.id is not None:
         lecture = await session.scalar(
             select(Lecture).where(Lecture.source_upload_item_id == item.id)
@@ -303,9 +307,9 @@ async def set_item_teacher(
 ) -> tuple[Optional[UploadItem], Optional[str]]:
     """Assign or clear an upload's teacher.
 
-    Teacher metadata is editable even after batch approval, but it does not
-    recompute classification status. The linked lecture is updated in the same
-    transaction so a later projection cannot restore stale metadata.
+    Manual assignments are editable even after batch approval and are protected
+    from later automatic reclassification. The linked lecture is updated in the
+    same transaction so a later projection cannot restore stale metadata.
     """
     item = await session.get(UploadItem, item_id)
     if not item:
@@ -324,6 +328,10 @@ async def set_item_teacher(
             return None, "Teacher belongs to a different subject."
 
     item.teacher_id = teacher_id
+    item.teacher_source = "manual"
+    item.teacher_review_reason = None
+    if item.status in {"classified", "needs_review"}:
+        _recompute_item_status(item)
     lecture = await session.scalar(
         select(Lecture).where(Lecture.source_upload_item_id == item.id)
     )

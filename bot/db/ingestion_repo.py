@@ -8,7 +8,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bot.db.models import Course, SystemSetting, UploadBatch, UploadItem
+from bot.db.models import (
+    Course,
+    Lecture,
+    SystemSetting,
+    Teacher,
+    UploadBatch,
+    UploadItem,
+)
 from bot.errors import ApprovedBatchError
 
 
@@ -230,6 +237,31 @@ def _recompute_item_status(item: UploadItem) -> None:
     item.review_reason = "; ".join(reasons) if reasons else None
 
 
+async def clear_teacher_if_subject_mismatch(
+    session: AsyncSession, item: UploadItem, subject_id: int
+) -> bool:
+    """Drop teacher metadata when an upload moves to another subject.
+
+    Teachers are subject-scoped, so keeping the old teacher would create an
+    invalid catalogue entry. The linked lecture is cleared as well to keep
+    projection from restoring the stale assignment.
+    """
+    if item.teacher_id is None:
+        return False
+    teacher = await session.get(Teacher, item.teacher_id)
+    if teacher is not None and teacher.subject_id == subject_id:
+        return False
+
+    item.teacher_id = None
+    if item.id is not None:
+        lecture = await session.scalar(
+            select(Lecture).where(Lecture.source_upload_item_id == item.id)
+        )
+        if lecture is not None:
+            lecture.teacher_id = None
+    return True
+
+
 async def set_item_course(
     session: AsyncSession, item_id: int, course_id: int
 ) -> tuple[Optional[UploadItem], Optional[str]]:
@@ -241,6 +273,7 @@ async def set_item_course(
     if not course:
         return None, "Course not found."
     item.course_id = course.id
+    await clear_teacher_if_subject_mismatch(session, item, course.subject_id)
     item.error = None
     _recompute_item_status(item)
     await session.commit()
@@ -260,6 +293,42 @@ async def set_item_number(
     item.lecture_number = number
     item.error = None
     _recompute_item_status(item)
+    await session.commit()
+    await session.refresh(item)
+    return item, None
+
+
+async def set_item_teacher(
+    session: AsyncSession, item_id: int, teacher_id: Optional[int]
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Assign or clear an upload's teacher.
+
+    Teacher metadata is editable even after batch approval, but it does not
+    recompute classification status. The linked lecture is updated in the same
+    transaction so a later projection cannot restore stale metadata.
+    """
+    item = await session.get(UploadItem, item_id)
+    if not item:
+        return None, "Item not found."
+
+    if teacher_id is not None:
+        teacher = await session.get(Teacher, teacher_id)
+        if teacher is None:
+            return None, "Teacher not found."
+        if item.course_id is None:
+            return None, "Assign a course to this item before assigning a teacher."
+        course = await session.get(Course, item.course_id)
+        if course is None:
+            return None, "Course not found."
+        if course.subject_id != teacher.subject_id:
+            return None, "Teacher belongs to a different subject."
+
+    item.teacher_id = teacher_id
+    lecture = await session.scalar(
+        select(Lecture).where(Lecture.source_upload_item_id == item.id)
+    )
+    if lecture is not None:
+        lecture.teacher_id = teacher_id
     await session.commit()
     await session.refresh(item)
     return item, None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -13,11 +15,18 @@ from bot.db.ingestion_repo import (
     list_courses,
     set_item_course,
     set_item_number,
+    set_item_teacher,
     skip_item,
     upsert_course,
 )
 from bot.config import get_settings
-from bot.db.repo import get_subject
+from bot.db.models import Teacher
+from bot.db.repo import (
+    add_teacher,
+    get_subject,
+    list_teachers,
+    set_lecture_teacher,
+)
 from bot.errors import ApprovedBatchError
 from bot.services.auth import require_admin
 from bot.services.ingestion import (
@@ -54,6 +63,32 @@ async def _reply_lines(message: Message, lines: list[str]) -> None:
 
 def _args(message: Message, command: str) -> list[str]:
     return message.text.replace(command, "", 1).strip().split()
+
+
+def _assignment_args(message: Message, command: str) -> list[str]:
+    raw = message.text.replace(command, "", 1).strip()
+    parts = [part.strip() for part in raw.split("|")]
+    if len(parts) == 1:
+        parts = raw.split()
+    return parts
+
+
+def _teacher_id_arg(raw: str) -> tuple[Optional[int], Optional[str]]:
+    value = raw.strip().lower()
+    if value in {"none", "0", "-"}:
+        return None, None
+    if not value.isdigit() or int(value) <= 0:
+        return None, "Teacher ID must be a positive number, 0, or none."
+    return int(value), None
+
+
+async def _teacher_line(session, item) -> str:
+    if not item.teacher_id:
+        return "teacher: not specified"
+    teacher = await session.get(Teacher, item.teacher_id)
+    if teacher is None:
+        return f"teacher: missing (id {item.teacher_id})"
+    return f"teacher: #{teacher.id} {teacher.name}"
 
 
 def _item_line(item) -> str:
@@ -122,6 +157,7 @@ async def batch_cmd(message: Message, session):
     for item in items:
         lines.append(_item_line(item))
         lines.append("  " + await _course_line(session, item))
+        lines.append("  " + await _teacher_line(session, item))
     await _reply_lines(message, lines)
 
 
@@ -146,6 +182,7 @@ async def dryrun_cmd(message: Message, session):
     for item in items:
         lines.append(_item_line(item))
         lines.append("  " + await _course_line(session, item))
+        lines.append("  " + await _teacher_line(session, item))
     await _reply_lines(message, lines)
 
 
@@ -296,6 +333,114 @@ async def setnumber_cmd(message: Message, session):
         await message.answer(error)
         return
     await message.answer(f"Lecture number set.\n{_item_line(item)}")
+
+
+@router.message(Command("addteacher"))
+async def addteacher_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    raw = message.text.replace("/addteacher", "", 1).strip()
+    parts = [part.strip() for part in raw.split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        await message.answer(
+            "Usage: /addteacher <subject_slug>|<name>\n"
+            "Example: /addteacher anatomy|Dr A. Sharma"
+        )
+        return
+    subject_slug, name = parts[0], parts[1]
+    subject = await get_subject(session, subject_slug)
+    if not subject:
+        await message.answer(
+            f"Subject '{subject_slug}' not found. Use /subjects to see the available subjects."
+        )
+        return
+    teacher, error = await add_teacher(session, subject.id, name)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(
+        f"Added teacher #{teacher.id}: {teacher.name} ({subject.name})"
+    )
+
+
+@router.message(Command("teachers"))
+async def teachers_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/teachers")
+    if not args:
+        await message.answer("Usage: /teachers <subject_slug>")
+        return
+    subject = await get_subject(session, args[0])
+    if not subject:
+        await message.answer("Subject not found.")
+        return
+    teachers = await list_teachers(session, subject.id)
+    if not teachers:
+        await message.answer(
+            f"No teachers for {subject.name}. Use /addteacher {subject.slug}|<name>."
+        )
+        return
+    lines = [f"Teachers for {subject.name}:"]
+    for teacher in teachers:
+        lines.append(f"#{teacher.id} {teacher.name}")
+    await _reply_lines(message, lines)
+
+
+@router.message(Command("setteacher"))
+async def setteacher_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    parts = _assignment_args(message, "/setteacher")
+    if len(parts) < 2 or not parts[0].isdigit():
+        await message.answer(
+            "Usage: /setteacher <item_id>|<teacher_id|none>"
+        )
+        return
+    teacher_id, error = _teacher_id_arg(parts[1])
+    if error:
+        await message.answer(error)
+        return
+    item, error = await set_item_teacher(session, int(parts[0]), teacher_id)
+    if error:
+        await message.answer(error)
+        return
+    if teacher_id is None:
+        await message.answer(f"Teacher cleared for item #{item.id}.")
+        return
+    teacher = await session.get(Teacher, teacher_id)
+    await message.answer(
+        f"Teacher set to #{teacher.id} {teacher.name} for item #{item.id}."
+    )
+
+
+@router.message(Command("setlectureteacher"))
+async def setlectureteacher_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    parts = _assignment_args(message, "/setlectureteacher")
+    if len(parts) < 2 or not parts[0].isdigit():
+        await message.answer(
+            "Usage: /setlectureteacher <lecture_id>|<teacher_id|none>"
+        )
+        return
+    teacher_id, error = _teacher_id_arg(parts[1])
+    if error:
+        await message.answer(error)
+        return
+    lecture, error = await set_lecture_teacher(
+        session, int(parts[0]), teacher_id
+    )
+    if error:
+        await message.answer(error)
+        return
+    if teacher_id is None:
+        await message.answer(f"Teacher cleared for lecture #{lecture.id}.")
+        return
+    teacher = await session.get(Teacher, teacher_id)
+    await message.answer(
+        f"Lecture #{lecture.id} teacher set to #{teacher.id} {teacher.name}."
+    )
 
 
 @router.message(Command("pause"))

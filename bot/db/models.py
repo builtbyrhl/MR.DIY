@@ -60,6 +60,22 @@ class Subject(Base):
     lectures: Mapped[list["Lecture"]] = relationship(back_populates="subject", cascade="all, delete-orphan")
 
 
+class Teacher(Base):
+    __tablename__ = "teachers"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "normalized_name", name="uq_teacher_subject_normalized_name"
+        ),
+        Index("ix_teachers_subject", "subject_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(128))
+    normalized_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Lecture(Base):
     __tablename__ = "lectures"
     __table_args__ = (
@@ -68,10 +84,19 @@ class Lecture(Base):
             "source_upload_item_id",
             unique=True,
         ),
+        Index(
+            "ix_lectures_subject_teacher_order",
+            "subject_id",
+            "teacher_id",
+            "order",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    teacher_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("teachers.id", ondelete="SET NULL"), nullable=True
+    )
     source_upload_item_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("upload_items.id", ondelete="SET NULL"), nullable=True
     )
@@ -188,6 +213,9 @@ class UploadItem(Base):
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     lecture_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
+    teacher_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("teachers.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="received")
     publication_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.ingestion_repo import (
+    clear_teacher_if_subject_mismatch,
     ensure_item_mutable,
     find_duplicate_file,
     get_item_by_source,
@@ -130,6 +131,14 @@ async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
         reasons.append("multiple course matches")
     else:
         item.course_id = matches[0].id
+        if await clear_teacher_if_subject_mismatch(
+            session, item, matches[0].subject_id
+        ):
+            logger.info(
+                "Cleared incompatible teacher from upload item #%s after "
+                "course reclassification",
+                item.id,
+            )
 
     if parsed.number_ambiguous:
         reasons.append("ambiguous lecture number")

@@ -17,9 +17,11 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("file_id", String(256)),
     ("publication_status", String(32)),
     ("published_message_id", BigInteger()),
+    ("teacher_id", Integer()),
 )
 
 _LECTURE_SOURCE_UPLOAD_INDEX = "uq_lectures_source_upload_item"
+_LECTURE_TEACHER_INDEX = "ix_lectures_subject_teacher_order"
 
 _USER_ACCESS_NEW_COLUMNS = (
     ("access_status", String(16)),
@@ -98,10 +100,12 @@ def ensure_upload_item_columns(connection) -> None:
 
 
 def ensure_lecture_columns(connection) -> None:
-    """Add the published-upload link to an existing lectures table.
+    """Add published-upload and teacher links to an existing lectures table.
 
     Existing legacy lectures keep a NULL link, so they continue to play from
     CHANNEL_ID. The unique index makes repeated projection/backfill safe.
+    Existing lectures also keep teacher_id NULL and stay visible in the
+    "Teacher not specified" bucket.
     """
     inspector = inspect(connection)
     if not inspector.has_table("lectures"):
@@ -109,10 +113,8 @@ def ensure_lecture_columns(connection) -> None:
 
     existing = {column["name"] for column in inspector.get_columns("lectures")}
     table = connection.dialect.identifier_preparer.quote("lectures")
+    if_not_exists = "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
     if "source_upload_item_id" not in existing:
-        if_not_exists = (
-            "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
-        )
         column = Column(
             "source_upload_item_id",
             Integer,
@@ -125,6 +127,17 @@ def ensure_lecture_columns(connection) -> None:
         connection.execute(
             text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
         )
+    if "teacher_id" not in existing:
+        # Legacy databases cannot add a foreign key with ALTER TABLE, so the
+        # application validates subject/teacher consistency instead.
+        definition = str(
+            CreateColumn(Column("teacher_id", Integer, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
 
     index = connection.dialect.identifier_preparer.quote(
         _LECTURE_SOURCE_UPLOAD_INDEX
@@ -133,6 +146,16 @@ def ensure_lecture_columns(connection) -> None:
         text(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {index} "
             f"ON {table} (source_upload_item_id)"
+        )
+    )
+    teacher_index = connection.dialect.identifier_preparer.quote(
+        _LECTURE_TEACHER_INDEX
+    )
+    order_column = connection.dialect.identifier_preparer.quote("order")
+    connection.execute(
+        text(
+            f"CREATE INDEX IF NOT EXISTS {teacher_index} "
+            f"ON {table} (subject_id, teacher_id, {order_column})"
         )
     )
 

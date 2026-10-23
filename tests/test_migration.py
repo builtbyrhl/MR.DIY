@@ -56,7 +56,12 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
             )
         ).one()
 
-    assert {"file_id", "publication_status", "published_message_id"} <= columns
+    assert {
+        "file_id",
+        "publication_status",
+        "published_message_id",
+        "teacher_id",
+    } <= columns
     assert row.id == 1
     assert row.file_unique_id == "existing-unique-id"
     assert row.status == "classified"
@@ -278,20 +283,28 @@ async def test_startup_migration_links_legacy_lectures_without_data_loss(
                 for index in inspect(conn).get_indexes("lectures")
             }
         )
+        has_teachers = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("teachers")
+        )
         row = (
             await connection.execute(
                 text(
-                    'SELECT id, title, channel_message_id, source_upload_item_id '
-                    'FROM lectures WHERE id = 7'
+                    "SELECT id, title, channel_message_id, "
+                    "source_upload_item_id, teacher_id "
+                    "FROM lectures WHERE id = 7"
                 )
             )
         ).one()
 
+    assert has_teachers is True
     assert "source_upload_item_id" in columns
+    assert "teacher_id" in columns
     assert "uq_lectures_source_upload_item" in indexes
+    assert "ix_lectures_subject_teacher_order" in indexes
     assert row.id == 7
     assert row.title == "Legacy Biochemistry Lecture"
     assert row.channel_message_id == 456
     assert row.source_upload_item_id is None
+    assert row.teacher_id is None
 
     await engine.dispose()

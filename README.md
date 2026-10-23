@@ -13,6 +13,7 @@ Python (aiogram 3) + PostgreSQL.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
 - `/reorder <subject_slug>` to sort by channel sequence.
 - `/grant <user_id> [days]` only works for users who have already started the bot.
+- Teachers: `/addteacher <subject_slug>|<name>`, `/teachers <subject_slug>`, `/setteacher <item_id>|<teacher_id|none>`, and `/setlectureteacher <lecture_id>|<teacher_id|none>`.
 - Content is forwarded from `CHANNEL_ID`.
 
 ## Milestone 1: upload inbox + review + publishing
@@ -33,21 +34,29 @@ Python (aiogram 3) + PostgreSQL.
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
    - `/pause` / `/resume`
-7. Duplicates and uncertain year/teacher/number go to `needs_review`; nothing is assumed automatically.
+7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher metadata is optional and is never guessed from captions.
 8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day.
-9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items.
+9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items. Teacher assignment remains available because it only changes catalogue metadata.
 10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, the item is left in `publishing` and is **not auto-resent**. Verify the destination topic, then use `/unlockpublish <item>` and `/publish <id>` deliberately.
+11. `/batch` and `/dryrun` show the current teacher assignment for every item.
+
+## Teacher-based student navigation
+Students choose `Subject → Teacher → Lecture`. Teacher lists are built dynamically from the published catalogue, with lecture counts per teacher. Teachers are subject-specific: the same person teaching two subjects has one teacher record per subject. Names are normalized (spacing, punctuation, and case) within each subject to prevent duplicates.
+
+Teacher assignment is optional. Uploads and existing lectures with no teacher stay visible under **Teacher not specified**. Create teachers with `/addteacher`, then assign them with `/setteacher` (upload item) or `/setlectureteacher` (existing lecture). Setting a teacher to `none` clears the assignment. Subject mismatches are rejected.
+
+Teacher corrections update both the upload item and its linked lecture in one transaction. This prevents startup catalogue sync from restoring stale teacher metadata after a restart. Legacy lectures remain in the unspecified bucket until an admin sets a teacher.
 
 ## Content protection
 Student media is sent with Telegram's `protect_content=True`, and the same flag is used when publishing to course topics and copying legacy channel lectures. This disables native forwarding/saving inside Telegram only. It is **not DRM**: users can still screen-record or redistribute files, and Telegram can remove the flag on some content. Do not describe it as copy-proof.
 
 ## Backup and restore
 Take a backup before deploying schema changes.
-- PostgreSQL: `pg_dump "$DATABASE_URL" --format=custom --file=mrdiy-backup.dump`
-- Restore only into an empty/new database: `pg_restore --dbname="$DATABASE_URL" --clean --if-exists mrdiy-backup.dump`
+- PostgreSQL: strip SQLAlchemy's `+asyncpg` suffix before passing the URL to libpq tools: `pg_dump --dbname="${DATABASE_URL/+asyncpg/}" --format=custom --file=mrdiy-backup.dump`.
+- Restore only into an empty/new database: `pg_restore --dbname="${DATABASE_URL/+asyncpg/}" --clean --if-exists mrdiy-backup.dump`.
 - SQLite (local/dev): stop the bot, copy the `.db` file, and keep the copy outside the repo.
 
-The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
+The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id` columns and indexes without changing row data. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
 
 ## Deploy on Render
 1. Push repo to GitHub.

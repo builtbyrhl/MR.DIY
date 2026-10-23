@@ -49,6 +49,10 @@ def test_review_commands_gate_unauthorized_users():
         (review.resume_cmd, "/resume"),
         (review.addcourse_cmd, "/addcourse 1st Year|anatomy|Dr A|dr a"),
         (review.courses_cmd, "/courses"),
+        (review.addteacher_cmd, "/addteacher anatomy|Dr A"),
+        (review.teachers_cmd, "/teachers anatomy"),
+        (review.setteacher_cmd, "/setteacher 1|1"),
+        (review.setlectureteacher_cmd, "/setlectureteacher 1|1"),
     ],
 )
 async def test_every_review_command_rejects_non_admin(handler, text, session):

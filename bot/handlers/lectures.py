@@ -14,8 +14,12 @@ from bot.services.access import has_library_access
 router = Router()
 logger = logging.getLogger(__name__)
 
-# track last subject for "back"
+# track last subject for the legacy "back_subject" callback
 _last_subject: dict[int, str] = {}
+
+
+def _lecture_back_callback(lecture) -> str:
+    return f"back_teacher:{lecture.subject_id}:{lecture.teacher_id or 0}"
 
 
 @router.callback_query(F.data.startswith("lec:"))
@@ -36,7 +40,13 @@ async def open_lecture(cb: CallbackQuery, session, db_user, bot):
         await cb.message.edit_text(
             f"💎 *{lec.title}*\n\nPremium lecture. Upgrade to watch.",
             parse_mode="Markdown",
-            reply_markup=lecture_actions_kb(lec.id, False, premium, True),
+            reply_markup=lecture_actions_kb(
+                lec.id,
+                False,
+                premium,
+                True,
+                back_callback=_lecture_back_callback(lec),
+            ),
         )
         await cb.answer()
         return
@@ -51,7 +61,13 @@ async def open_lecture(cb: CallbackQuery, session, db_user, bot):
         text += f"\n⏱ {lec.duration_sec//60} min"
     if lec.tags:
         text += f"\n🏷 {lec.tags}"
-    kb = lecture_actions_kb(lec.id, is_bm, premium, lec.is_premium)
+    kb = lecture_actions_kb(
+        lec.id,
+        is_bm,
+        premium,
+        lec.is_premium,
+        back_callback=_lecture_back_callback(lec),
+    )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await cb.answer()
 
@@ -156,7 +172,13 @@ async def toggle_bm(cb: CallbackQuery, session, db_user):
     bms = await list_bookmarks(session, db_user.id)
     is_bm = any(b.id == lid for b in bms)
     text = f"🎬 *{lec.title}*\n\n{lec.description or ''}"
-    kb = lecture_actions_kb(lec.id, is_bm, premium, lec.is_premium)
+    kb = lecture_actions_kb(
+        lec.id,
+        is_bm,
+        premium,
+        lec.is_premium,
+        back_callback=_lecture_back_callback(lec),
+    )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
 
 

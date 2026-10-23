@@ -14,7 +14,7 @@ from bot.db.repo import (
     subject_progress,
 )
 from bot.handlers.lectures import watch_lecture
-from bot.handlers.subjects import open_subject
+from bot.handlers.subjects import open_subject, open_teacher_lectures
 from bot.services.access import APPROVED
 from bot.services.catalog import (
     project_upload_to_lecture,
@@ -209,6 +209,15 @@ async def test_subject_callback_lists_projected_uploads_in_order(
     assert "Progress: 0/2" in text
 
     data = _button_data(cb.message.edit_text.await_args.kwargs["reply_markup"])
+    teacher_callbacks = [value for value in data if value.startswith("tlec:")]
+    assert teacher_callbacks == [f"tlec:{subject.id}:0:0"]
+
+    cb_lectures = _callback(teacher_callbacks[0], user.id)
+    await open_teacher_lectures(cb_lectures, session, user)
+
+    data = _button_data(
+        cb_lectures.message.edit_text.await_args.kwargs["reply_markup"]
+    )
     lecture_ids = [value for value in data if value.startswith("lec:")]
     lectures = (
         await session.scalars(
@@ -219,6 +228,7 @@ async def test_subject_callback_lists_projected_uploads_in_order(
     assert lecture_ids[0] == f"lec:{earlier.id}"
     assert lecture_ids[1] == f"lec:{later.id}"
     cb.answer.assert_awaited_once_with()
+    cb_lectures.answer.assert_awaited_once_with()
 
 
 async def test_empty_subject_callback_explains_missing_lectures(

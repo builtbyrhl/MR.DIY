@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.models import Course, Lecture, UploadItem
+from bot.db.models import Course, Lecture, Teacher, UploadItem
 from bot.db.repo import list_subjects
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,24 @@ async def project_upload_to_lecture(
     )
     lecture.subject_id = course.subject_id
     lecture.title = (raw_title or f"Lecture {fallback_number}")[:256]
+
+    # Read the teacher directly from the database. A publishing session may
+    # hold an older UploadItem instance while an admin correction has already
+    # been committed by another request.
+    teacher_id = await session.scalar(
+        select(UploadItem.teacher_id).where(UploadItem.id == item.id)
+    )
+    if teacher_id is not None:
+        teacher = await session.get(Teacher, teacher_id)
+        if teacher is None or teacher.subject_id != course.subject_id:
+            logger.warning(
+                "Ignoring invalid teacher #%s for upload item #%s (subject %s)",
+                teacher_id,
+                item.id,
+                course.subject_id,
+            )
+            teacher_id = None
+    lecture.teacher_id = teacher_id
 
     if item.lecture_number is not None:
         lecture.order = item.lecture_number

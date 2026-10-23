@@ -48,7 +48,8 @@ async def admin_panel(message: Message):
         "/unlockpublish <item> — after verifying an uncertain publish\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
         "/pause · /resume\n"
-        "/whereami"
+        "/whereami",
+        parse_mode=None,
     )
 
 

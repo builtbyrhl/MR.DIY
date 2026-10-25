@@ -99,7 +99,8 @@ class ParsedCaption:
 
 SLASH_FIELD_COUNT = 4
 NUMBERED_SLASH_FIELD_COUNT = 5
-FINAL_LECTURE_NUMBER = re.compile(r"^[Ll](\d{1,3})$")
+NUMBERED_PIPE_FIELD_COUNT = 5
+FINAL_LECTURE_NUMBER = re.compile(r"^[Ll]([1-9]\d{0,2})$")
 LECTURE_FIELD_PREFIX = re.compile(
     r"^(?:lecture|lec|class|video|part)\b", re.IGNORECASE
 )
@@ -322,12 +323,16 @@ def _ambiguous_slash_caption(
     )
 
 
-def _number_like_slash_field(value: str) -> bool:
+def _number_like_final_field(value: str) -> bool:
     cleaned = _clean_field(value)
-    return bool(
-        cleaned.startswith(("L", "l"))
-        or _looks_like_lecture_field(cleaned)
-        or re.fullmatch(r"\d{1,3}", cleaned)
+    if not cleaned:
+        return False
+    if re.fullmatch(r"\d{1,3}", cleaned):
+        return True
+    if cleaned.startswith(("L", "l")) and any(ch.isdigit() for ch in cleaned):
+        return True
+    return _looks_like_lecture_field(cleaned) and any(
+        ch.isdigit() for ch in cleaned
     )
 
 
@@ -352,7 +357,7 @@ def _parse_numbered_slash_line(line: str) -> Optional[ParsedCaption]:
             number = candidate_number
         else:
             format_error = f"invalid lecture number: {number_field}"
-    elif _number_like_slash_field(number_field):
+    elif _number_like_final_field(number_field):
         format_error = f"invalid lecture number: {number_field}"
     else:
         return None
@@ -466,6 +471,49 @@ def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
     )
 
 
+def _parse_numbered_pipe_line(line: str) -> Optional[ParsedCaption]:
+    """Parse ``Subject | Teacher | Subtopic | Video Title | L<number>``.
+
+    The final field is the only place a lecture number is read from. If the
+    fourth field contains an ``L<n>``-looking phrase it remains part of the
+    video title. A malformed final number field is a reviewable format error.
+    """
+    parts = [part.strip() for part in line.split("|")]
+    if len(parts) != NUMBERED_PIPE_FIELD_COUNT:
+        return None
+
+    number_field = _clean_field(parts[4])
+    match = FINAL_LECTURE_NUMBER.fullmatch(number_field)
+    number: Optional[int] = None
+    format_error: Optional[str] = None
+    if not number_field:
+        format_error = "lecture number missing"
+    elif match:
+        number = int(match.group(1))
+    elif _number_like_final_field(number_field):
+        format_error = f"invalid lecture number: {number_field}"
+    else:
+        return None
+
+    video_title = _clean_field(parts[3])
+    candidate = _caption_candidate(
+        format="pipe_numbered",
+        subject=parts[0],
+        teacher_raw=parts[1],
+        topic=parts[2],
+        numbers=[number] if number is not None else [],
+        lecture_title=video_title or None,
+        number_required=True,
+    )
+    if format_error is None:
+        format_error = _preferred_video_title_error(
+            video_title, parts[0], parts[2]
+        )
+    return _parsed_from_caption_candidate(
+        candidate, raw_line=line, format_error=format_error
+    )
+
+
 def _ambiguous_pipe_caption(
     line: str,
     preferred: CaptionCandidate,
@@ -492,6 +540,11 @@ def _parse_pipe_line(line: str) -> Optional[ParsedCaption]:
     parts = [part.strip() for part in line.split("|")]
     if len(parts) < 3:
         return None
+
+    if len(parts) == NUMBERED_PIPE_FIELD_COUNT:
+        numbered = _parse_numbered_pipe_line(line)
+        if numbered is not None:
+            return numbered
 
     subject = parts[0]
     second = parts[1]
@@ -650,6 +703,7 @@ def preferred_caption_error(
         return parsed.format_error or "ambiguous caption layout"
     if parsed.caption_format not in {
         "pipe_preferred",
+        "pipe_numbered",
         "slash_preferred",
         "slash_numbered",
     }:

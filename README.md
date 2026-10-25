@@ -63,44 +63,45 @@ Admin membership is re-read from the database at the start of each update, so se
 
 ## Topic organization
 
-The explicit caption format is:
+The standard caption format uses pipe separators:
 
 ```text
-Subject | Topic | Lecture Number | Teacher
-Anatomy | Skull | Lecture 1 | Dr Mohammad Azam Sir
-```
-
-The first line must contain at least three pipe-separated fields, and the third field must contain a lecture number. Such captions are parsed as structured metadata: subject, topic, number, and teacher. A missing fourth field flags `teacher missing`. The old caption style is unchanged.
-
-Slash-separated captions are also supported. The preferred numbered layout is:
-
-```text
-Subject / Teacher / Subtopic or System / Video Title / L<number>
-Anatomy / Dr Mohammad Azam Sir / Thorax / Thoracic wall / L1
-Anatomy / Dr Mohammad Azam Sir / Thorax / Intercostal Artery / L2
+Subject | Teacher | Subtopic or System | Video Title | L<number>
+Anatomy | Dr Mohammad Azam Sir | Thorax | Thoracic wall | L1
+Anatomy | Dr Mohammad Azam Sir | Thorax | Intercostal Artery | L2
 ```
 
 The final field must be a standalone `L<number>` between 1 and 999; matching is case-insensitive. The video-title field is stored as the student-visible lecture title, and the lecture number is stored as an integer for numeric ordering. Do not put the number in the title. A missing, malformed, or out-of-range final number sends the item to `needs_review`. An `L<number>` inside the title is not used as the lecture number.
 
-The four-field layout remains supported for captions without a number:
+The four-field pipe layout remains supported for captions without a number:
 
 ```text
-Subject / Teacher / Subtopic or System / Video Title
-Anatomy / Dr Mohammad Azam Sir / Neuroanatomy / Brainstem
+Subject | Teacher | Subtopic or System | Video Title
+Anatomy | Dr Mohammad Azam Sir | Neuroanatomy | Brainstem
 ```
 
 Empty, pure lecture-number, or subject/topic-repeat titles are treated as generic and sent to `needs_review`.
 
-The legacy slash layout remains valid:
+The legacy pipe layout remains valid:
 
 ```text
-Subject / Subtopic or System / Lecture Number / Teacher
-Anatomy / Head and Neck / Lecture 12 / Dr Mohammad Azam Sir
+Subject | Subtopic or System | Lecture Number | Teacher
+Anatomy | Head and Neck | Lecture 12 | Dr Mohammad Azam Sir
 ```
 
-The four-field slash layouts require exactly four fields; the numbered layout requires exactly five. Existing course, teacher, and topic records resolve fields and aliases; if an ambiguous four-field layout does not produce exactly one valid interpretation, the item goes to `needs_review`. A legacy lecture field may include a title suffix, for example `Lecture 3: Cranial Nerves`.
+The first line must contain at least three pipe-separated fields. In the legacy layout, the third field must contain a lecture number and a missing fourth field flags `teacher missing`. A legacy lecture field may include a title suffix, for example `Lecture 3: Cranial Nerves`.
 
-Topics are subject-scoped and must already exist. Match names exactly after case, spacing, and punctuation normalization; captions never create topics. Unknown, missing, or ambiguous topics send the item to `needs_review` with a reason such as `topic not found: Neuroanatomy`. Add topics with `/addtopic anatomy|Skull` before ingesting. Pipe and legacy slash captions use the canonical topic or original lecture title; the preferred slash layout uses its final field as the visible video title.
+Slash-separated captions are also supported for legacy and imported content, including:
+
+```text
+Subject / Teacher / Subtopic or System / Video Title / L<number>
+Subject / Teacher / Subtopic or System / Video Title
+Subject / Subtopic or System / Lecture Number / Teacher
+```
+
+The four-field slash layouts require exactly four fields; the numbered slash layout requires exactly five. Existing course, teacher, and topic records resolve fields and aliases; if an ambiguous four-field layout does not produce exactly one valid interpretation, the item goes to `needs_review`.
+
+Topics are subject-scoped and must already exist. Match names exactly after case, spacing, and punctuation normalization; captions never create topics. Unknown, missing, or ambiguous topics send the item to `needs_review` with a reason such as `topic not found: Neuroanatomy`. Add topics with `/addtopic anatomy|Skull` before ingesting. Pipe and legacy slash captions use the canonical topic or original lecture title; the numbered pipe and slash layouts use their video-title field as the visible title.
 
 Lectures may belong to multiple topics. Lecture numbers are unique within a course and shared topic, so `L1` can exist in both `Skull` and `Upper Limb`, but a second `L1` in `Skull` is sent to `needs_review` as a duplicate. Topic assignment can be corrected after batch approval; clearing a topic is also treated as a manual decision and survives `/retry`.
 

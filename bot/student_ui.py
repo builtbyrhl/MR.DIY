@@ -138,8 +138,18 @@ def _caption_title(raw_caption: str | None) -> str:
         return ""
     if "|" in line:
         parts = [part.strip() for part in line.split("|")]
+        if len(parts) == 5 and (
+            _NUMBER_FIELD.fullmatch(parts[4]) or parts[4] == ""
+        ):
+            return " ".join(parts[3].split())
         if len(parts) >= 3 and _NUMBER_FIELD.fullmatch(parts[2].strip()):
             return " ".join(parts[1].split())
+        if (
+            len(parts) == 4
+            and _TEACHER_FIELD.match(parts[1])
+            and not _TEACHER_FIELD.match(parts[3])
+        ):
+            return " ".join(parts[3].split())
     if "/" in line:
         return _slash_caption_title(line) or line
     return line

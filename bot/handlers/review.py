@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 from aiogram import Bot, Router
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+)
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -24,7 +30,7 @@ from bot.db.ingestion_repo import (
     upsert_course,
 )
 from bot.config import get_settings
-from bot.db.models import Teacher
+from bot.db.models import Teacher, UploadItem
 from bot.db.repo import (
     add_teacher,
     add_teacher_alias,
@@ -43,11 +49,15 @@ from bot.db.repo import (
 from bot.errors import ApprovedBatchError
 from bot.services.auth import require_admin
 from bot.services.ingestion import (
+    CAPTION_EDIT_BLOCKED_STATUSES,
     keep_item,
     pause_ingestion,
+    preferred_caption_error,
+    reclassify_item_caption,
     resume_ingestion,
     retry_item,
     set_item_caption,
+    update_ingested_caption,
 )
 from bot.services.publishing import (
     publish_batch,
@@ -82,6 +92,185 @@ async def _reply_lines(message: Message, lines: list[str]) -> None:
             chunk = candidate
     if chunk:
         await message.answer(chunk)
+
+
+async def _reply_plain_lines(message: Message, lines: list[str]) -> None:
+    chunk = ""
+    for line in lines:
+        candidate = f"{chunk}\n{line}" if chunk else line
+        if len(candidate) > 3800:
+            await message.answer(chunk, parse_mode=None)
+            chunk = line
+        else:
+            chunk = candidate
+    if chunk:
+        await message.answer(chunk, parse_mode=None)
+
+
+@dataclass
+class _CaptionRefreshPlan:
+    item: UploadItem
+    action: str
+    reason: str
+    source_caption: Optional[str] = None
+    source_error: Optional[str] = None
+
+
+def _caption_refresh_plan(
+    item: UploadItem,
+    source_caption: Optional[str],
+    source_error: Optional[str],
+) -> _CaptionRefreshPlan:
+    if item.status == "skipped":
+        return _CaptionRefreshPlan(
+            item,
+            "skip",
+            "item is skipped",
+            source_caption,
+            source_error,
+        )
+    if (
+        item.status in CAPTION_EDIT_BLOCKED_STATUSES
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return _CaptionRefreshPlan(
+            item,
+            "skip",
+            "item is publishing, published, or otherwise locked",
+            source_caption,
+            source_error,
+        )
+
+    current_error = preferred_caption_error(item.raw_caption, item.file_name)
+    source_valid = (
+        source_caption is not None
+        and preferred_caption_error(source_caption, item.file_name) is None
+    )
+
+    if current_error is None:
+        if item.status == "classified":
+            return _CaptionRefreshPlan(
+                item,
+                "preserve",
+                "current preferred caption is already valid",
+                source_caption,
+                source_error,
+            )
+        return _CaptionRefreshPlan(
+            item,
+            "reclassify",
+            "keep current preferred caption and reclassify",
+            source_caption,
+            source_error,
+        )
+
+    if source_valid:
+        return _CaptionRefreshPlan(
+            item,
+            "update",
+            "replace non-preferred caption with recovered source",
+            source_caption,
+            source_error,
+        )
+
+    if source_caption is None:
+        reason = "source unavailable and current caption is not preferred"
+        if source_error:
+            reason += f": {source_error}"
+        return _CaptionRefreshPlan(
+            item, "skip", reason, source_caption, source_error
+        )
+    return _CaptionRefreshPlan(
+        item,
+        "skip",
+        "recovered source does not use the preferred layout",
+        source_caption,
+        source_error,
+    )
+
+
+def _telegram_error_text(exc: Exception) -> str:
+    detail = " ".join(str(exc).split())
+    return f"{detail[:220]}" if detail else exc.__class__.__name__
+
+
+async def _fetch_source_caption(
+    bot: Bot, admin_chat_id: int, item: UploadItem
+) -> tuple[Optional[str], Optional[str]]:
+    forwarded = None
+    try:
+        forwarded = await bot.forward_message(
+            chat_id=admin_chat_id,
+            from_chat_id=item.source_chat_id,
+            message_id=item.source_message_id,
+            disable_notification=True,
+        )
+    except TelegramForbiddenError as exc:
+        return None, "source chat is not accessible to the bot: " + (
+            _telegram_error_text(exc)
+        )
+    except TelegramBadRequest as exc:
+        return None, "source message is unavailable or protected: " + (
+            _telegram_error_text(exc)
+        )
+    except TelegramAPIError as exc:
+        return None, "Telegram could not retrieve the source message: " + (
+            _telegram_error_text(exc)
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to forward source message %s/%s for item #%s",
+            item.source_chat_id,
+            item.source_message_id,
+            item.id,
+        )
+        return None, "unexpected error retrieving source message: " + (
+            _telegram_error_text(exc)
+        )
+
+    forwarded_id = getattr(forwarded, "message_id", None)
+    if forwarded_id is not None:
+        try:
+            await bot.delete_message(
+                chat_id=admin_chat_id, message_id=forwarded_id
+            )
+        except Exception:
+            logger.warning(
+                "Could not delete temporary forwarded message %s in chat %s",
+                forwarded_id,
+                admin_chat_id,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "Forwarded source message for item #%s has no message ID",
+            item.id,
+        )
+
+    caption = (getattr(forwarded, "caption", None) or "").strip()
+    if not caption:
+        return None, "source message has no caption"
+    return caption, None
+
+
+def _refresh_plan_lines(plan: _CaptionRefreshPlan) -> list[str]:
+    lines = [
+        f"#{plan.item.id} [{plan.item.status}] action: {plan.action} - {plan.reason}",
+        f"  current: {plan.item.raw_caption or '(none)'}",
+    ]
+    if plan.source_caption is not None:
+        lines.append(f"  source: {plan.source_caption}")
+    else:
+        lines.append(
+            f"  source: unavailable - {plan.source_error or 'not available'}"
+        )
+    return lines
+
+
+def _source_unavailable_note(plan: _CaptionRefreshPlan) -> str:
+    if not plan.source_error:
+        return ""
+    return f" (source unavailable: {plan.source_error})"
 
 
 def _args_raw(message: Message, command: str) -> str:
@@ -304,6 +493,143 @@ async def dryrun_cmd(message: Message, session):
         lines.append("  " + await _teacher_line(session, item))
         lines.append("  " + await _topic_line(session, item))
     await _reply_lines(message, lines)
+
+
+@router.message(Command("refreshcaptions"))
+async def refreshcaptions_cmd(message: Message, session, bot: Bot):
+    if not _authorized(message):
+        return
+    args = _args(message, "/refreshcaptions")
+    if (
+        len(args) not in {1, 2}
+        or not args[0].isdigit()
+        or (len(args) == 2 and args[1].casefold() != "apply")
+    ):
+        await message.answer(
+            "Usage: /refreshcaptions <batch_id> [apply]\n"
+            "Preview without apply. Apply updates only non-preferred captions "
+            "and reclassifies already-valid ones. It never publishes or "
+            "creates uploads.",
+            parse_mode=None,
+        )
+        return
+
+    apply_changes = len(args) == 2
+    batch = await get_batch(session, int(args[0]))
+    if not batch:
+        await message.answer("Batch not found.", parse_mode=None)
+        return
+    if apply_changes and batch.status != "open":
+        await message.answer(
+            f"Batch #{batch.id} is {batch.status}; no changes were applied.",
+            parse_mode=None,
+        )
+        return
+
+    items = await get_batch_items(session, batch.id)
+    if not items:
+        await message.answer("Batch has no items.", parse_mode=None)
+        return
+
+    admin_chat_id = message.from_user.id
+    plans: list[_CaptionRefreshPlan] = []
+    for item in items:
+        source_caption, source_error = await _fetch_source_caption(
+            bot, admin_chat_id, item
+        )
+        plans.append(
+            _caption_refresh_plan(item, source_caption, source_error)
+        )
+
+    if not apply_changes:
+        lines = [
+            f"Caption refresh preview - batch #{batch.id} ({len(items)} items). "
+            "No database changes made.",
+            "Add 'apply' to update non-preferred captions and reclassify "
+            "valid ones. No messages will be published.",
+        ]
+        for plan in plans:
+            lines.extend(_refresh_plan_lines(plan))
+        await _reply_plain_lines(message, lines)
+        return
+
+    updated = 0
+    reclassified = 0
+    preserved = 0
+    skipped = 0
+    failed = 0
+    lines: list[str] = []
+
+    for plan in plans:
+        item = plan.item
+        if plan.action == "preserve":
+            preserved += 1
+            lines.append(
+                f"#{item.id}: kept current preferred caption"
+                f"{_source_unavailable_note(plan)}"
+            )
+            continue
+        if plan.action == "skip":
+            skipped += 1
+            lines.append(f"#{item.id}: skipped - {plan.reason}")
+            continue
+
+        try:
+            if plan.action == "update":
+                refreshed, outcome = await update_ingested_caption(
+                    session,
+                    source_chat_id=item.source_chat_id,
+                    source_message_id=item.source_message_id,
+                    caption=plan.source_caption,
+                )
+            else:
+                refreshed, outcome = await reclassify_item_caption(
+                    session, item.id
+                )
+        except Exception as exc:
+            await session.rollback()
+            logger.exception(
+                "Caption refresh failed for item #%s in batch #%s",
+                item.id,
+                batch.id,
+            )
+            failed += 1
+            lines.append(
+                f"#{item.id}: failed - {_telegram_error_text(exc)}"
+            )
+            continue
+
+        if outcome == "updated":
+            updated += 1
+            lines.append(
+                f"#{item.id}: caption updated and reclassified -> "
+                f"[{refreshed.status}] {refreshed.title or 'Untitled'}"
+            )
+        elif outcome == "reclassified":
+            reclassified += 1
+            lines.append(
+                f"#{item.id}: current caption reclassified -> "
+                f"[{refreshed.status}] {refreshed.title or 'Untitled'}"
+                f"{_source_unavailable_note(plan)}"
+            )
+        elif outcome == "unchanged":
+            preserved += 1
+            lines.append(f"#{item.id}: caption already up to date")
+        elif outcome == "failed":
+            failed += 1
+            lines.append(
+                f"#{item.id}: failed - classification error recorded"
+            )
+        else:
+            skipped += 1
+            lines.append(f"#{item.id}: skipped - {outcome}")
+
+    header = (
+        f"Caption refresh applied to batch #{batch.id}: {updated} updated, "
+        f"{reclassified} reclassified, {preserved} preserved, "
+        f"{skipped} skipped, {failed} failed."
+    )
+    await _reply_plain_lines(message, [header, *lines])
 
 
 @router.message(Command("approve"))

@@ -19,6 +19,7 @@ Python (aiogram 3) + PostgreSQL.
 - Bulk assignment: `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->` (use `-` to leave a field unchanged).
 - Bulk teacher assignment: `/setteacherbulk 7,9,8|1` assigns one existing teacher to up to 200 items atomically. Item IDs must be unique positive integers. Invalid input, a missing item, or a subject mismatch leaves every item unchanged.
 - Caption correction: `/setcaption <item_id>|<caption>` reclassifies an unapproved item and preserves the previous caption.
+- Caption recovery: `/refreshcaptions <batch_id> [apply]` previews or applies captions recovered from the stored source messages. It never publishes or creates uploads.
 - Content is forwarded from `CHANNEL_ID`.
 
 ### Administrators
@@ -52,6 +53,7 @@ Admin membership is re-read from the database at the start of each update, so se
    - `/settopic <item_ids>|<topic_ids|none>`
    - `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->`
    - `/setcaption <item>|<caption>` (unapproved, non-skipped items only)
+   - `/refreshcaptions <batch_id> [apply]` (preview first; apply only updates non-preferred captions)
    - `/pause` / `/resume`
 7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher and topic metadata are optional and are only assigned when the caption format and an existing subject-scoped teacher/topic match are unambiguous.
 8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day. Editing an upload's caption in the inbox reclassifies it while unapproved; edits to approved, publishing, published, or skipped items are ignored and keep the original caption for audit.
@@ -92,7 +94,7 @@ Topics are subject-scoped and must already exist. Match names exactly after case
 
 Lectures may belong to multiple topics. Lecture numbers are validated per topic/teacher sequence, so `Lecture 1` can exist in both `Skull` and `Upper Limb` without a global duplicate-number conflict. Topic assignment can be corrected after batch approval; clearing a topic is also treated as a manual decision and survives `/retry`.
 
-Existing uploads and legacy captions are never assigned topics automatically. Re-ingesting old Telegram messages is not possible; use `/setcaption` on unapproved, non-skipped items (use `/keep` first to restore a skipped item) or `/settopic` and `/setlecturetopic` on existing catalogue entries to classify them deliberately. Telegram caption edits update the database only while the item remains unapproved; edits to approved, publishing, or published items are deliberately ignored. To correct the student-visible title of an already published video without re-uploading it, use `/setlecturetitle <lecture_id>|<title>`. This mirrors the title to the linked upload while leaving the original caption, file ID, publication state, and audit history unchanged. Legacy lectures remain available through teacher browsing.
+Existing uploads and legacy captions are never assigned topics automatically. Re-ingesting old Telegram messages creates new uploads, so use `/refreshcaptions <batch_id>` to preview captions recovered from the stored source messages, then `/refreshcaptions <batch_id> apply` to update only non-preferred captions and reclassify already-valid ones. Alternatively use `/setcaption` on unapproved, non-skipped items (use `/keep` first to restore a skipped item) or `/settopic` and `/setlecturetopic` on existing catalogue entries to classify them deliberately. The recovery command forwards temporary copies only to the requesting admin's private chat and deletes them; it preserves valid preferred captions, never publishes, and never creates new uploads. Telegram caption edits update the database only while the item remains unapproved; edits to approved, publishing, or published items are deliberately ignored. To correct the student-visible title of an already published video without re-uploading it, use `/setlecturetitle <lecture_id>|<title>`. This mirrors the title to the linked upload while leaving the original caption, file ID, publication state, and audit history unchanged. Legacy lectures remain available through teacher browsing.
 
 ## Automatic teacher extraction
 For legacy captions, put the teacher at the end of the first caption line. In the explicit `Subject | Topic | Lecture Number | Teacher` format, only the fourth field is used as the teacher. A legacy teacher caption looks like:

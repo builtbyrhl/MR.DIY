@@ -68,6 +68,7 @@ async def admin_panel(message: Message):
         "/assign <item_ids>|<course|->|<topics|none|->|<teacher|none|->\n"
         "/setcaption <item_id>|<caption> — reclassify an unapproved item\n"
         "/review\n"
+        "/refreshcaptions <batch_id> [apply] - recover source captions\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
         "/publish <id>\n"
         "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"

@@ -569,6 +569,34 @@ def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCap
     )
 
 
+def preferred_caption_error(
+    caption: Optional[str], file_name: Optional[str]
+) -> Optional[str]:
+    """Return why a caption is not a valid preferred-layout caption."""
+    parsed = parse_caption(caption, file_name)
+    if not parsed.structured:
+        return "caption is not structured"
+    if (
+        parsed.ambiguous
+        or parsed.pipe_candidates
+        or parsed.slash_candidates
+    ):
+        return parsed.format_error or "ambiguous caption layout"
+    if parsed.caption_format not in {"pipe_preferred", "slash_preferred"}:
+        return f"caption uses the {parsed.caption_format} layout"
+    if parsed.format_error:
+        return parsed.format_error
+    if not parsed.subject_name:
+        return "subject missing"
+    if parsed.teacher_missing or not parsed.teacher_name:
+        return "teacher missing"
+    if not parsed.topic_name:
+        return "topic missing"
+    if not (parsed.lecture_title or "").strip():
+        return "video title missing"
+    return None
+
+
 def _course_candidates(course: Course) -> list[str]:
     candidates = [course.name]
     if course.aliases:
@@ -1020,6 +1048,51 @@ async def retry_item(session: AsyncSession, item_id: int) -> Optional[UploadItem
     await session.commit()
     await session.refresh(item)
     return item
+
+
+async def reclassify_item_caption(
+    session: AsyncSession, item_id: int
+) -> tuple[Optional[UploadItem], str]:
+    """Reclassify an item using its current caption without rewriting it."""
+    item = await session.get(UploadItem, item_id)
+    if not item:
+        return None, "not_found"
+    if item.status == "skipped":
+        return item, "skipped"
+    if (
+        item.status in CAPTION_EDIT_BLOCKED_STATUSES
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return item, "published"
+
+    try:
+        await ensure_item_mutable(session, item)
+    except ApprovedBatchError:
+        return item, "approved"
+
+    item.status = "received"
+    item.error = None
+    item.review_reason = None
+    item.teacher_review_reason = None
+    item.topic_review_reason = None
+    await session.commit()
+
+    try:
+        await classify_item(session, item)
+        await session.commit()
+        await session.refresh(item)
+    except Exception as exc:  # keep the item and record a retryable failure
+        logger.exception("Failed to reclassify upload item #%s", item_id)
+        await session.rollback()
+        failed = await session.get(UploadItem, item_id)
+        if failed:
+            failed.status = "failed"
+            failed.error = str(exc)[:1000]
+            await session.commit()
+            await session.refresh(failed)
+            return failed, "failed"
+        raise
+    return item, "reclassified"
 
 
 async def _replace_item_caption(

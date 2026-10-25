@@ -69,3 +69,13 @@ async def test_every_review_command_rejects_non_admin(handler, text, session):
     message = _message(999, text)
     await handler(message, session)
     message.answer.assert_not_awaited()
+
+
+async def test_refreshcaptions_rejects_non_admin_without_forwarding(session):
+    message = _message(999, "/refreshcaptions 4 apply")
+    bot = AsyncMock()
+
+    await review.refreshcaptions_cmd(message, session, bot)
+
+    message.answer.assert_not_awaited()
+    bot.forward_message.assert_not_awaited()

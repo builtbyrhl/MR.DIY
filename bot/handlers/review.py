@@ -902,7 +902,8 @@ async def setcaption_cmd(message: Message, session):
     if len(parts) < 2 or not parts[0].strip().isdigit():
         await message.answer(
             "Usage: /setcaption <item_id>|<new caption>\n"
-            "The previous caption is kept for audit."
+            "The previous caption is kept for audit.",
+            parse_mode=None,
         )
         return
     try:
@@ -910,12 +911,15 @@ async def setcaption_cmd(message: Message, session):
             session, int(parts[0].strip()), parts[1]
         )
     except ApprovedBatchError as exc:
-        await message.answer(str(exc))
+        await message.answer(str(exc), parse_mode=None)
         return
     if error:
-        await message.answer(error)
+        await message.answer(error, parse_mode=None)
         return
-    await message.answer(f"Caption updated and item reclassified.\n{_item_line(item)}")
+    await message.answer(
+        f"Caption updated and item reclassified.\n{_item_line(item)}",
+        parse_mode=None,
+    )
 
 
 @router.message(Command("setlecturetitle"))

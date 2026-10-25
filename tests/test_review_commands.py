@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bot.db.ingestion_repo import approve_batch, skip_item
 from bot.db.models import Lecture
@@ -60,6 +60,46 @@ async def test_setcaption_rejects_skipped_item_without_reviving_it(
     await session.refresh(item)
     assert item.status == "skipped"
     assert item.raw_caption == original_caption
+
+
+async def test_setcaption_usage_is_sent_as_plain_text():
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text="/setcaption",
+        answer=AsyncMock(),
+    )
+
+    await review.setcaption_cmd(message, None)
+
+    message.answer.assert_awaited_once()
+    assert "<item_id>" in message.answer.await_args.args[0]
+    assert message.answer.await_args.kwargs == {"parse_mode": None}
+
+
+async def test_setcaption_success_reply_uses_plain_text_for_special_titles():
+    item = SimpleNamespace(
+        id=77,
+        status="needs_review",
+        lecture_number=8,
+        title="_Cardio_ *Exam* [Part 1] `code`",
+        duplicate_flag=False,
+        review_reason=None,
+        teacher_review_reason=None,
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/setcaption {item.id}|Anatomy A Lecture 8",
+        answer=AsyncMock(),
+    )
+    set_caption = AsyncMock(return_value=(item, None))
+
+    with patch.object(review, "set_item_caption", set_caption):
+        await review.setcaption_cmd(message, object())
+
+    set_caption.assert_awaited_once()
+    message.answer.assert_awaited_once()
+    assert item.title in message.answer.await_args.args[0]
+    assert message.answer.await_args.kwargs == {"parse_mode": None}
 
 
 async def test_setlecturetitle_updates_without_reupload(

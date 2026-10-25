@@ -2,6 +2,30 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
+from bot.student_ui import (
+    clamp_page,
+    clip,
+    lecture_label,
+    total_pages,
+)
+
+
+def _nav_rows(prefix: str, page: int, pages: int) -> list[list[InlineKeyboardButton]]:
+    nav = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️ Previous", callback_data=f"{prefix}:{page - 1}"
+            )
+        )
+    if page < pages - 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="Next ▶️", callback_data=f"{prefix}:{page + 1}"
+            )
+        )
+    return [nav] if nav else []
+
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -14,10 +38,11 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def request_access_kb() -> InlineKeyboardMarkup:
+def request_access_kb(pending: bool = False) -> InlineKeyboardMarkup:
+    label = "⏳ Check request status" if pending else "🔓 Request Access"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔓 Request Access", callback_data="request_access")],
+            [InlineKeyboardButton(text=label, callback_data="request_access")],
         ]
     )
 
@@ -37,69 +62,257 @@ def access_review_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def subjects_kb(subjects, page: int = 0, per_page: int = 8) -> InlineKeyboardMarkup:
+def subjects_kb(
+    subjects,
+    page: int = 0,
+    per_page: int = 8,
+    counts: dict[int, int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(subjects), per_page)
+    page = clamp_page(page, len(subjects), per_page)
     start = page * per_page
     chunk = subjects[start:start + per_page]
-    rows = [[InlineKeyboardButton(text=f"{s.emoji} {s.name}", callback_data=f"subj:{s.slug}")] for s in chunk]
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"subjpage:{page-1}"))
-    if start + per_page < len(subjects):
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"subjpage:{page+1}"))
-    if nav:
-        rows.append(nav)
+    counts = counts or {}
+    rows = []
+    for subject in chunk:
+        label = f"{subject.emoji} {subject.name}"
+        if subject.id in counts:
+            label += f" · {counts[subject.id]}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=clip(label),
+                    callback_data=f"subj:{subject.slug}",
+                )
+            ]
+        )
+    rows.extend(_nav_rows("subjpage", page, pages))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def lectures_kb(lectures, subject_slug: str, page: int = 0, per_page: int = 8, show_watched: bool = True) -> InlineKeyboardMarkup:
+def lectures_kb(
+    lectures,
+    subject_slug: str,
+    page: int = 0,
+    per_page: int = 8,
+    watched_ids: set[int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
     start = page * per_page
     chunk = lectures[start:start + per_page]
-    rows = []
-    for lec in chunk:
-        prefix = "✅ " if show_watched else ""
-        label = f"{prefix}{lec.title}"
-        if lec.is_premium:
-            label = "💎 " + label
-        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"lec:{lec.id}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"lecpage:{subject_slug}:{page-1}"))
-    if start + per_page < len(lectures):
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"lecpage:{subject_slug}:{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")])
+    watched_ids = watched_ids or set()
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=lecture_label(
+                    lecture, watched=lecture.id in watched_ids
+                ),
+                callback_data=f"lec:{lecture.id}",
+            )
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(_nav_rows(f"lecpage:{subject_slug}", page, pages))
+    rows.append(
+        [InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def teachers_kb(groups, subject_id: int, page: int = 0, per_page: int = 8) -> InlineKeyboardMarkup:
+def teachers_kb(
+    groups,
+    subject_id: int,
+    page: int = 0,
+    per_page: int = 8,
+    has_topics: bool = False,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(groups), per_page)
+    page = clamp_page(page, len(groups), per_page)
     start = page * per_page
     chunk = groups[start:start + per_page]
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{group.name} ({group.lecture_count})"[:60],
+                text=clip(f"{group.name} · {group.lecture_count}"),
                 callback_data=f"tlec:{subject_id}:{group.teacher_id or 0}:0",
             )
         ]
         for group in chunk
     ]
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                text="◀️", callback_data=f"teachers:{subject_id}:{page-1}"
-            )
+    rows.extend(_nav_rows(f"teachers:{subject_id}", page, pages))
+    if has_topics:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗂 Browse by topic",
+                    callback_data=f"topics:{subject_id}:0",
+                )
+            ]
         )
-    if start + per_page < len(groups):
-        nav.append(
-            InlineKeyboardButton(
-                text="▶️", callback_data=f"teachers:{subject_id}:{page+1}"
-            )
-        )
-    if nav:
-        rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topics_kb(
+    groups,
+    subject_id: int,
+    page: int = 0,
+    per_page: int = 8,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(groups), per_page)
+    page = clamp_page(page, len(groups), per_page)
+    start = page * per_page
+    chunk = groups[start:start + per_page]
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=clip(f"{group.name} · {group.lecture_count}"),
+                callback_data=(
+                    f"topicview:{subject_id}:{group.topic_id}:0"
+                ),
+            )
+        ]
+        for group in chunk
+    ]
+    rows.extend(_nav_rows(f"topics:{subject_id}", page, pages))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="👩‍🏫 Browse by teacher",
+                callback_data=f"teachers:{subject_id}:0",
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def teacher_topics_kb(
+    groups,
+    subject_id: int,
+    teacher_id: int,
+    page: int = 0,
+    per_page: int = 8,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(groups), per_page)
+    page = clamp_page(page, len(groups), per_page)
+    start = page * per_page
+    chunk = groups[start:start + per_page]
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=clip(f"{group.name} · {group.lecture_count}"),
+                callback_data=(
+                    f"ttopic:{subject_id}:{teacher_id}:{group.topic_id}:0"
+                ),
+            )
+        ]
+        for group in chunk
+    ]
+    rows.extend(_nav_rows(f"tlec:{subject_id}:{teacher_id}", page, pages))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📖 All teacher lectures",
+                callback_data=f"tlecflat:{subject_id}:{teacher_id}:0",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Teachers", callback_data=f"teachers:{subject_id}:0"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def teacher_topic_lectures_kb(
+    lectures,
+    subject_id: int,
+    teacher_id: int,
+    topic_id: int,
+    page: int = 0,
+    per_page: int = 8,
+    watched_ids: set[int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
+    start = page * per_page
+    chunk = lectures[start:start + per_page]
+    watched_ids = watched_ids or set()
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=lecture_label(
+                    lecture, watched=lecture.id in watched_ids
+                ),
+                callback_data=(
+                    f"lec:{lecture.id}:tcht:{subject_id}:{teacher_id}:"
+                    f"{topic_id}:{page}"
+                ),
+            )
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(
+        _nav_rows(
+            f"ttopic:{subject_id}:{teacher_id}:{topic_id}", page, pages
+        )
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Systems",
+                callback_data=f"tlec:{subject_id}:{teacher_id}:0",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topic_lectures_kb(
+    lectures,
+    subject_id: int,
+    topic_id: int,
+    page: int = 0,
+    per_page: int = 8,
+    teacher_names: dict[int, str] | None = None,
+    watched_ids: set[int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
+    start = page * per_page
+    chunk = lectures[start:start + per_page]
+    teacher_names = teacher_names or {}
+    watched_ids = watched_ids or set()
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=lecture_label(
+                    lecture,
+                    teacher_name=teacher_names.get(lecture.teacher_id or 0),
+                    watched=lecture.id in watched_ids,
+                ),
+                callback_data=(
+                    f"lec:{lecture.id}:t:{subject_id}:{topic_id}:{page}"
+                ),
+            )
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(_nav_rows(f"topicview:{subject_id}:{topic_id}", page, pages))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Topics", callback_data=f"topics:{subject_id}:0"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -109,34 +322,30 @@ def teacher_lectures_kb(
     teacher_id: int,
     page: int = 0,
     per_page: int = 8,
+    watched_ids: set[int] | None = None,
+    nav_prefix: str = "tlec",
 ) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
     start = page * per_page
     chunk = lectures[start:start + per_page]
-    rows = []
-    for lec in chunk:
-        label = lec.title
-        if lec.is_premium:
-            label = "💎 " + label
-        rows.append(
-            [InlineKeyboardButton(text=label[:60], callback_data=f"lec:{lec.id}")]
-        )
-    nav = []
-    if page > 0:
-        nav.append(
+    watched_ids = watched_ids or set()
+    rows = [
+        [
             InlineKeyboardButton(
-                text="◀️",
-                callback_data=f"tlec:{subject_id}:{teacher_id}:{page-1}",
+                text=lecture_label(
+                    lecture, watched=lecture.id in watched_ids
+                ),
+                callback_data=(
+                    f"lec:{lecture.id}:tch:{subject_id}:{teacher_id}:{page}"
+                ),
             )
-        )
-    if start + per_page < len(lectures):
-        nav.append(
-            InlineKeyboardButton(
-                text="▶️",
-                callback_data=f"tlec:{subject_id}:{teacher_id}:{page+1}",
-            )
-        )
-    if nav:
-        rows.append(nav)
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(
+        _nav_rows(f"{nav_prefix}:{subject_id}:{teacher_id}", page, pages)
+    )
     rows.append(
         [
             InlineKeyboardButton(
@@ -156,23 +365,103 @@ def lecture_actions_kb(
 ) -> InlineKeyboardMarkup:
     rows = []
     if lecture_premium and not is_premium_user:
-        rows.append([InlineKeyboardButton(text="💎 Unlock Premium", callback_data="premium")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="💎 Unlock with Premium", callback_data="premium"
+                )
+            ]
+        )
     else:
-        rows.append([InlineKeyboardButton(text="▶️ Watch", callback_data=f"watch:{lecture_id}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="▶️ Watch lecture", callback_data=f"watch:{lecture_id}"
+                )
+            ]
+        )
     bm = "★ Remove bookmark" if is_bookmarked else "☆ Bookmark"
     rows.append([InlineKeyboardButton(text=bm, callback_data=f"bm:{lecture_id}")])
-    rows.append([InlineKeyboardButton(text="✅ Mark watched", callback_data=f"done:{lecture_id}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Mark as watched", callback_data=f"done:{lecture_id}"
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pagination_kb(prefix: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
-    rows = []
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"{prefix}:{page-1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"{prefix}:{page+1}"))
-    if nav:
-        rows.append(nav)
+def bookmarks_kb(
+    lectures,
+    page: int = 0,
+    per_page: int = 8,
+    watched_ids: set[int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
+    start = page * per_page
+    chunk = lectures[start:start + per_page]
+    watched_ids = watched_ids or set()
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=lecture_label(
+                    lecture, watched=lecture.id in watched_ids
+                ),
+                callback_data=f"lec:{lecture.id}:b:{page}",
+            )
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(_nav_rows("bookmarks", page, pages))
+    rows.append(
+        [InlineKeyboardButton(text="📚 Browse subjects", callback_data="subjects")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def search_results_kb(
+    lectures,
+    page: int = 0,
+    per_page: int = 8,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(lectures), per_page)
+    page = clamp_page(page, len(lectures), per_page)
+    start = page * per_page
+    chunk = lectures[start:start + per_page]
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=lecture_label(lecture),
+                callback_data=f"lec:{lecture.id}:s",
+            )
+        ]
+        for lecture in chunk
+    ]
+    rows.extend(_nav_rows("searchpage", page, pages))
+    rows.append(
+        [InlineKeyboardButton(text="📚 Browse subjects", callback_data="subjects")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def browse_subjects_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📚 Browse subjects", callback_data="subjects"
+                )
+            ]
+        ]
+    )
+
+
+def pagination_kb(
+    prefix: str, page: int, total_page_count: int
+) -> InlineKeyboardMarkup:
+    page = min(max(page, 0), max(total_page_count - 1, 0))
+    rows = _nav_rows(prefix, page, total_page_count)
     return InlineKeyboardMarkup(inline_keyboard=rows)

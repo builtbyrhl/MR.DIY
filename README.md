@@ -13,13 +13,28 @@ Python (aiogram 3) + PostgreSQL.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
 - `/reorder <subject_slug>` to sort by channel sequence.
 - `/grant <user_id> [days]` only works for users who have already started the bot.
-- Teachers: `/addteacher <subject_slug>|<name>`, `/teachers <subject_slug>`, `/setteacher <item_id>|<teacher_id|none>`, and `/setlectureteacher <lecture_id>|<teacher_id|none>`.
+- Teachers: `/addteacher <subject_slug>|<name>|[alias1,alias2]`, `/teachers <subject_slug>`, `/setteacher <item_id>|<teacher_id|none>`, `/setteacherbulk <item_ids>|<teacher_id>`, and `/setlectureteacher <lecture_id>|<teacher_id|none>`.
+- Teacher aliases: `/teacheralias <teacher_id>|<alias>`, `/removealias <teacher_id>|<alias>`, and `/renameteacher <teacher_id>|<new name>`. Aliases are explicit and subject-scoped; spelling is never guessed.
+- Topics: `/addtopic <subject_slug>|<name>`, `/topics <subject_slug>`, `/settopic <item_ids>|<topic_ids|none>`, and `/setlecturetopic <lecture_id>|<topic_ids|none>`.
+- Bulk assignment: `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->` (use `-` to leave a field unchanged).
+- Bulk teacher assignment: `/setteacherbulk 7,9,8|1` assigns one existing teacher to up to 200 items atomically. Item IDs must be unique positive integers. Invalid input, a missing item, or a subject mismatch leaves every item unchanged.
+- Caption correction: `/setcaption <item_id>|<caption>` reclassifies an unapproved item and preserves the previous caption.
 - Content is forwarded from `CHANNEL_ID`.
+
+### Administrators
+`ADMIN_IDS` is the immutable owner/superadmin list. Owners can manage additional administrators from a private chat:
+- `/admins` — list owners and database-granted admins.
+- `/addadmin <user_id>` — grant admin access; the user must have started the bot first.
+- `/removeadmin <user_id>` — revoke a database-granted admin. Owners and the last remaining administrator cannot be removed here.
+
+To find a new admin's numeric ID, ask them to `/start` the bot, then look in `/access` for their pending user ID (or use a trusted Telegram user-ID tool). After they are added, `/whereami` also shows their own user ID. Database admins have the same command access as owners except for add/remove-admin commands, which are owner-only. Keep at least one owner in `ADMIN_IDS`.
+
+Admin membership is re-read from the database at the start of each update, so separate bot processes see add/remove changes without a restart. An update already in flight may still use the previous snapshot.
 
 ## Milestone 1: upload inbox + review + publishing
 1. BotFather → `/setprivacy` → **Disable** (required to read forwarded videos in groups).
 2. Add the bot to your private **Upload Inbox** group.
-3. Set `UPLOAD_INBOX_CHAT_ID` (numeric like `-100123...` or `@username`).
+3. Set `UPLOAD_INBOX_CHAT_ID` (numeric like `-100123...` or `@username`). The inbox must be a group/supergroup. Channel posts and edited channel posts are not ingested.
 4. Add courses (one per subject topic of the Med Lounge forum):
    `/addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]`
    Example: `/addcourse anatomy|Anatomy|anatomy,anat|-100123...|12`
@@ -30,18 +45,57 @@ Python (aiogram 3) + PostgreSQL.
    - `/batch <id>` / `/dryrun <id>` — sorted preview
    - `/approve <id>` — approve and lock the batch (does not publish)
    - `/publish <id>` — publish an approved batch to each course destination/topic
-   - `/unlockpublish <item>` — clear an uncertain publish state after manually checking the destination topic
+   - `/reconcilepublish <item>|<message_id>|<destination_chat_id>|<topic_id>` — record an existing published message without sending again
+   - `/unlockpublish <item>` — clear an uncertain publish state only after confirming no message exists
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
+   - `/settopic <item_ids>|<topic_ids|none>`
+   - `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->`
+   - `/setcaption <item>|<caption>` (unapproved, non-skipped items only)
    - `/pause` / `/resume`
-7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher metadata is optional and is only assigned when the caption format and an existing subject-scoped teacher match are unambiguous.
-8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day.
-9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, and `/setnumber` are rejected on approved items. Teacher assignment remains available because it only changes catalogue metadata.
-10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, the item is left in `publishing` and is **not auto-resent**. Verify the destination topic, then use `/unlockpublish <item>` and `/publish <id>` deliberately.
-11. `/batch` and `/dryrun` show the current teacher assignment and any automatic teacher-matching failure reason for every item.
+7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher and topic metadata are optional and are only assigned when the caption format and an existing subject-scoped teacher/topic match are unambiguous.
+8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day. Editing an upload's caption in the inbox reclassifies it while unapproved; edits to approved, publishing, published, or skipped items are ignored and keep the original caption for audit.
+9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, `/setnumber`, and `/setcaption` are rejected on approved items. Teacher and topic assignment remains available because it only changes catalogue metadata.
+10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, or Telegram times out/loses the response, the item is left in `publishing` and is **not auto-resent**. Definite Telegram rejections, including flood-control `429` responses, are marked `failed` and can be retried; wait for the reported retry delay first. For an uncertain state, verify the destination topic. If the message exists, use `/reconcilepublish <item>|<message_id>|<destination_chat_id>|<topic_id>` to record it without sending again. If it does not exist, use `/unlockpublish <item>` and `/publish <id>` deliberately. Never unlock an item whose message already exists.
+11. `/batch` and `/dryrun` show the current teacher and topic assignments plus any automatic matching failure reason for every item.
+
+## Topic organization
+
+The explicit caption format is:
+
+```text
+Subject | Topic | Lecture Number | Teacher
+Anatomy | Skull | Lecture 1 | Dr Mohammad Azam Sir
+```
+
+The first line must contain at least three pipe-separated fields, and the third field must contain a lecture number. Such captions are parsed as structured metadata: subject, topic, number, and teacher. A missing fourth field flags `teacher missing`. The old caption style is unchanged.
+
+Slash-separated captions are also supported. The preferred layout is:
+
+```text
+Subject / Teacher / Subtopic or System / Video Title
+Anatomy / Dr Mohammad Azam Sir / Neuroanatomy / Brainstem
+```
+
+The video-title field is stored as the student-visible lecture title. No lecture number is required in this layout. Empty, pure lecture-number, or subject/topic-repeat titles are treated as generic and sent to `needs_review`.
+
+The legacy slash layout remains valid:
+
+```text
+Subject / Subtopic or System / Lecture Number / Teacher
+Anatomy / Head and Neck / Lecture 12 / Dr Mohammad Azam Sir
+```
+
+Both slash layouts require exactly four fields. Existing course, teacher, and topic records resolve fields and aliases; if an ambiguous layout does not produce exactly one valid interpretation, the item goes to `needs_review`. A legacy lecture field may include a title suffix, for example `Lecture 3: Cranial Nerves`.
+
+Topics are subject-scoped and must already exist. Match names exactly after case, spacing, and punctuation normalization; captions never create topics. Unknown, missing, or ambiguous topics send the item to `needs_review` with a reason such as `topic not found: Neuroanatomy`. Add topics with `/addtopic anatomy|Skull` before ingesting. Pipe and legacy slash captions use the canonical topic or original lecture title; the preferred slash layout uses its final field as the visible video title.
+
+Lectures may belong to multiple topics. Lecture numbers are validated per topic/teacher sequence, so `Lecture 1` can exist in both `Skull` and `Upper Limb` without a global duplicate-number conflict. Topic assignment can be corrected after batch approval; clearing a topic is also treated as a manual decision and survives `/retry`.
+
+Existing uploads and legacy captions are never assigned topics automatically. Re-ingesting old Telegram messages is not possible; use `/setcaption` on unapproved, non-skipped items (use `/keep` first to restore a skipped item) or `/settopic` and `/setlecturetopic` on existing catalogue entries to classify them deliberately. Telegram caption edits update the database only while the item remains unapproved; edits to approved, publishing, or published items are deliberately ignored. To correct the student-visible title of an already published video without re-uploading it, use `/setlecturetitle <lecture_id>|<title>`. This mirrors the title to the linked upload while leaving the original caption, file ID, publication state, and audit history unchanged. Legacy lectures remain available through teacher browsing.
 
 ## Automatic teacher extraction
-Put the teacher at the end of the first caption line. The exact supported format is:
+For legacy captions, put the teacher at the end of the first caption line. In the explicit `Subject | Topic | Lecture Number | Teacher` format, only the fourth field is used as the teacher. A legacy teacher caption looks like:
 
 ```text
 Lecture 10: Pathophysiology — Dr Sharma
@@ -59,19 +113,30 @@ The teacher segment may optionally use a `Teacher:`, `Faculty:`, or `By` prefix,
 
 Matching behavior:
 - The course/subject is identified first using whole-word course-name/alias matches. A single-token alias may match the start of a word only when no exact name/alias match exists (for example `anat` → `Anatomy`), so `Physiology` never matches inside `Pathophysiology`. No match or multiple course matches sends the item to `needs_review`.
-- The teacher is then matched by the existing normalized name rules within that single subject. The teacher must already exist; captions never create teacher records.
+- The teacher is then matched by canonical name or explicit alias within that single subject. The teacher must already exist; captions never create teacher records and spelling is never guessed. For example, add `Dr Mohammad Azam` as an alias when the teacher is displayed as `Dr. Muhammad Azam`.
 - Exactly one matching teacher is required. Unknown or ambiguous explicit teacher segments leave `teacher_id` unset and add a reason such as `teacher not found: Dr Sharma` to `/batch` and `/dryrun`.
 - A trailing plain subtitle that does not match a teacher, such as `Anatomy A Lecture 2 - Upper Limb`, is left in the title and does not block classification.
 - When a teacher is resolved, the teacher segment is removed from the lecture title.
 - If no teacher is specified, the lecture remains under **Teacher not specified**.
-- Manual `/setteacher` and `/setlectureteacher` corrections are marked as manual and are not overwritten by later `/retry` or automatic reclassification. Manually clearing a teacher also survives retries.
+- Manual `/setteacher`, `/setteacherbulk`, and `/setlectureteacher` corrections are marked as manual and are not overwritten by later `/retry` or automatic reclassification. Manually clearing a teacher also survives retries.
+
+### Recovering unresolved teacher items
+1. Check the subject roster with `/teachers anatomy`. Existing aliases are shown under each teacher.
+2. If the teacher is missing, add them with `/addteacher anatomy|Dr. Muhammad Azam|Dr Mohammad Azam,Mohammad Azam`. If only the spelling variant is missing, use `/teacheralias <teacher_id>|Dr Mohammad Azam`. Do not create a duplicate teacher just to match a spelling.
+3. Run `/batch <batch_id>` to get the item IDs and confirm the expected teacher ID.
+4. Either retry classification with `/retry <item_id>` for each item after adding the alias, or assign explicitly with `/setteacherbulk <item_ids>|<teacher_id>` or `/assign <item_ids>|-|-|<teacher_id>`.
+5. Run `/dryrun <batch_id>`, then `/approve <batch_id>` and `/publish <batch_id>` once the destination and metadata are verified. Existing items are not reclassified automatically after an alias change.
 
 ## Teacher-based student navigation
-Students choose `Subject → Teacher → Lecture`. Teacher lists are built dynamically from the published catalogue, with lecture counts per teacher. Teachers are subject-specific: the same person teaching two subjects has one teacher record per subject. Names are normalized (spacing, punctuation, and case) within each subject to prevent duplicates.
+Students choose `Subject → Teacher → System/Topic → Lecture`, or use **All teacher lectures** for a flat list. Teacher and topic lists are built dynamically from the published catalogue, with lecture counts per teacher. Teachers are subject-specific: the same person teaching two subjects has one teacher record per subject. Canonical names and explicit aliases are normalized (spacing, punctuation, and case) within each subject to prevent duplicates.
 
-Teacher assignment is optional. Uploads and existing lectures with no teacher stay visible under **Teacher not specified**. Create teachers with `/addteacher`, then assign them with `/setteacher` (upload item) or `/setlectureteacher` (existing lecture). Setting a teacher to `none` clears the assignment. Subject mismatches are rejected.
+Teacher assignment is optional. Uploads and existing lectures with no teacher stay visible under **Teacher not specified**. Create teachers with `/addteacher`, then assign them with `/setteacher` (upload item), `/setteacherbulk` (many upload items in one transaction), or `/setlectureteacher` (existing lecture). Setting a teacher to `none` clears the assignment; `/setteacherbulk` requires a positive teacher ID and cannot clear teachers. Subject mismatches are rejected. `/renameteacher` keeps the same teacher ID and all upload/lecture links; `/teacheralias` adds alternate caption spellings without renaming the teacher.
 
 Teacher corrections update both the upload item and its linked lecture in one transaction. This prevents startup catalogue sync from restoring stale teacher metadata after a restart. Legacy lectures remain in the unspecified bucket until an admin sets a teacher.
+
+## Topic-based student navigation
+
+Students can choose `Subject → Topic → Lecture` in addition to `Subject → Teacher → Lecture`. Topic lists are built from published lecture-topic associations with lecture counts, and the same lecture record is reused across every topic route. Pagination and back navigation preserve the selected topic. Topic links are projected from the upload item when publishing and are re-synced at startup. Moving an upload to another subject clears incompatible topic associations. Existing access approval and premium behavior are unchanged.
 
 ## Content protection
 Student media is sent with Telegram's `protect_content=True`, and the same flag is used when publishing to course topics and copying legacy channel lectures. This disables native forwarding/saving inside Telegram only. It is **not DRM**: users can still screen-record or redistribute files, and Telegram can remove the flag on some content. Do not describe it as copy-proof.
@@ -82,7 +147,7 @@ Take a backup before deploying schema changes.
 - Restore only into an empty/new database: `pg_restore --dbname="${DATABASE_URL/+asyncpg/}" --clean --if-exists mrdiy-backup.dump`.
 - SQLite (local/dev): stop the bot, copy the `.db` file, and keep the copy outside the repo.
 
-The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id`, `teacher_source`, and `teacher_review_reason` columns plus indexes without changing row data. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
+The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id`, `teacher_source`, `teacher_review_reason`, `original_caption`, `topic_source`, and `topic_review_reason` columns, and the new `topics`, `upload_item_topics`, `lecture_topics`, `teacher_aliases`, and `admin_users` tables are created. Existing rows keep their values and are not auto-classified into topics. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
 
 ## Deploy on Render
 1. Push repo to GitHub.

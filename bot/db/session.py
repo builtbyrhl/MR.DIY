@@ -20,6 +20,9 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("teacher_id", Integer()),
     ("teacher_source", String(16)),
     ("teacher_review_reason", Text()),
+    ("original_caption", Text()),
+    ("topic_source", String(16)),
+    ("topic_review_reason", Text()),
 )
 
 _LECTURE_SOURCE_UPLOAD_INDEX = "uq_lectures_source_upload_item"

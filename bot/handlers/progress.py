@@ -5,7 +5,9 @@ from aiogram.types import Message
 from aiogram.filters import Command
 
 from bot.db.repo import list_subjects, subject_progress, is_premium
+from bot.keyboards.inline import browse_subjects_kb
 from bot.services.catalog import ensure_subjects
+from bot.student_ui import progress_bar, progress_percent
 
 router = Router()
 
@@ -14,20 +16,41 @@ router = Router()
 async def progress_entry(message: Message, session, db_user):
     await ensure_subjects(session)
     subjects = await list_subjects(session)
-    lines = ["📈 *Your Progress*\n"]
-    total_d = total_t = 0
-    for s in subjects:
-        d, t = await subject_progress(session, db_user.id, s.id)
-        total_d += d
-        total_t += t
-        pct = int(d / t * 100) if t else 0
-        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        lines.append(f"{s.emoji} {s.name}: {bar} {d}/{t}")
-    overall = int(total_d / total_t * 100) if total_t else 0
-    lines.insert(1, f"Overall: {total_d}/{total_t} ({overall}%)\n")
+    total_done = total_lectures = 0
+    lines = []
+    for subject in subjects:
+        done, total = await subject_progress(session, db_user.id, subject.id)
+        if total == 0:
+            continue
+        total_done += done
+        total_lectures += total
+        lines.append(
+            f"{subject.emoji} {subject.name}  "
+            f"{progress_bar(done, total)} {done}/{total}"
+        )
+
+    if not lines:
+        text = (
+            "📈 *Your progress*\n\n"
+            "No published lectures yet. Browse the library to get started."
+        )
+        await message.answer(
+            text, parse_mode="Markdown", reply_markup=browse_subjects_kb()
+        )
+        return
+
+    overall = progress_percent(total_done, total_lectures)
+    text = (
+        "📈 *Your progress*\n"
+        f"{progress_bar(total_done, total_lectures)} "
+        f"{total_done}/{total_lectures} · {overall}% overall\n\n"
+        + "\n".join(lines)
+    )
     premium = await is_premium(db_user)
-    lines.append("\n" + ("💎 Premium active" if premium else "🆓 Free plan"))
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    text += "\n\n" + ("💎 Premium active" if premium else "🆓 Free plan")
+    await message.answer(
+        text, parse_mode="Markdown", reply_markup=browse_subjects_kb()
+    )
 
 
 @router.message(Command("progress"))

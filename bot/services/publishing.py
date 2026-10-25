@@ -5,6 +5,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from aiogram import Bot
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNotFound,
+    TelegramRetryAfter,
+    TelegramUnauthorizedError,
+)
 from sqlalchemy import or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,9 +34,28 @@ SKIPPED = "skipped"
 FAILED = "failed"
 
 UNCERTAIN_REASON = (
-    "a previous publish attempt did not complete. Verify the destination "
-    "topic for a duplicate, then use /unlockpublish before retrying."
+    "a previous publish attempt did not complete. If the message exists in "
+    "the destination topic, use /reconcilepublish; otherwise use "
+    "/unlockpublish before retrying."
 )
+
+DEFINITE_SEND_ERRORS = (
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNotFound,
+    TelegramUnauthorizedError,
+)
+
+
+def _uncertain_send_reason(detail: str) -> str:
+    return (
+        f"Telegram send outcome is uncertain: {detail}. If the message exists "
+        "in the destination topic, use /reconcilepublish; otherwise use "
+        "/unlockpublish before retrying."
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +123,20 @@ async def _mark_failed(
     return PublishResult(item_id=item.id, status=FAILED, reason=reason)
 
 
+async def _mark_uncertain(
+    session: AsyncSession, item: UploadItem, reason: str
+) -> PublishResult:
+    """Keep the publishing claim when Telegram's outcome cannot be known.
+
+    A retry in this state could create a duplicate, so an administrator must
+    inspect the destination topic and explicitly unlock the item.
+    """
+    item.publication_status = PUBLISHING
+    item.error = reason
+    await session.commit()
+    return PublishResult(item_id=item.id, status=FAILED, reason=reason)
+
+
 async def _claim_for_publish(
     session: AsyncSession, item: UploadItem
 ) -> bool:
@@ -123,12 +166,13 @@ async def _sync_student_catalog(
     session: AsyncSession, item: UploadItem
 ) -> None:
     """Best-effort projection; sending already succeeded at this point."""
+    item_id = item.id
     try:
         await project_upload_to_lecture(session, item)
         await session.commit()
     except Exception:
         await session.rollback()
-        logger.exception("Failed to project published upload #%s", item.id)
+        logger.exception("Failed to project published upload #%s", item_id)
 
 
 async def _publish_item(
@@ -243,19 +287,34 @@ async def _publish_item(
                 protect_content=True,
                 message_thread_id=course.topic_id,
             )
-    except Exception as exc:
+    except TelegramRetryAfter as exc:
         return await _mark_failed(
             session,
             item,
-            f"Telegram send failed: {exc}",
+            "Telegram flood control rejected the send; no message was sent. "
+            f"Retry after {exc.retry_after} seconds.",
+        )
+    except Exception as exc:
+        if isinstance(exc, DEFINITE_SEND_ERRORS):
+            return await _mark_failed(
+                session,
+                item,
+                f"Telegram rejected the send: {exc}",
+            )
+        return await _mark_uncertain(
+            session,
+            item,
+            _uncertain_send_reason(str(exc)),
         )
 
     message_id = getattr(sent, "message_id", None)
     if message_id is None:
-        return await _mark_failed(
+        return await _mark_uncertain(
             session,
             item,
-            "Telegram response did not include a message id",
+            _uncertain_send_reason(
+                "Telegram response did not include a message id"
+            ),
         )
 
     item.publication_status = PUBLISHED
@@ -310,6 +369,99 @@ async def unlock_publish_state(
     item.publication_status = None
     item.error = None
     await session.commit()
+    await session.refresh(item)
+    return item, None
+
+
+async def reconcile_publish_state(
+    session: AsyncSession,
+    item_id: int,
+    *,
+    message_id: int,
+    destination_chat_id: int | str,
+    topic_id: int,
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Record an already-sent message without sending it again.
+
+    This is intentionally narrower than /unlockpublish: it only accepts a
+    claimed item whose approved course matches the supplied destination and
+    topic. The conditional UPDATE keeps a concurrent state change from being
+    silently overwritten.
+    """
+    if message_id <= 0:
+        return None, "Message ID must be a positive integer."
+
+    raw_destination = str(destination_chat_id).strip()
+    if not raw_destination:
+        return None, "Destination chat ID is required."
+    destination = _normalise_destination(raw_destination)
+
+    if topic_id <= 0:
+        return None, "Topic ID must be a positive integer."
+
+    item = await session.get(UploadItem, item_id)
+    if item is None:
+        return None, "Item not found."
+    if item.status == "skipped":
+        return None, "Item is skipped; use /keep before reconciling it."
+    if item.publication_status != PUBLISHING or item.published_message_id is not None:
+        return None, "Item is not in an uncertain publishing state."
+
+    batch = await session.get(UploadBatch, item.batch_id)
+    if batch is None or batch.status != "approved":
+        return None, "The item's batch is not approved."
+
+    if item.course_id is None:
+        return None, "No course is assigned to this item."
+    course = await session.get(Course, item.course_id)
+    if course is None:
+        return None, f"Course #{item.course_id} no longer exists."
+
+    configured_destination = _resolve_destination(course)
+    if configured_destination is None:
+        return None, "Destination chat is not configured for this course."
+    if destination != configured_destination:
+        return None, (
+            "Destination chat does not match this item's course "
+            f"({configured_destination})."
+        )
+
+    if course.topic_id is None:
+        return None, "Topic ID is not configured for this course."
+    if topic_id != course.topic_id:
+        return None, (
+            "Topic ID does not match this item's course "
+            f"({course.topic_id})."
+        )
+
+    try:
+        result = await session.execute(
+            update(UploadItem)
+            .where(
+                UploadItem.id == item.id,
+                UploadItem.publication_status == PUBLISHING,
+                UploadItem.published_message_id.is_(None),
+            )
+            .values(
+                publication_status=PUBLISHED,
+                published_message_id=message_id,
+                error=None,
+            )
+        )
+        if result.rowcount != 1:
+            await session.rollback()
+            return None, (
+                "Item state changed while reconciling; refresh and verify "
+                "the destination before retrying."
+            )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception("Failed to reconcile publish state for upload #%s", item_id)
+        return None, "Could not reconcile publish state; no changes were applied."
+
+    await session.refresh(item)
+    await _sync_student_catalog(session, item)
     await session.refresh(item)
     return item, None
 

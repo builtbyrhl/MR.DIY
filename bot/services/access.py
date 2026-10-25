@@ -7,9 +7,8 @@ from typing import Optional
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.config import get_settings
 from bot.db.models import User
-from bot.services.auth import is_admin
+from bot.services.auth import all_admin_ids, is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +122,7 @@ async def list_pending(session: AsyncSession, limit: int = 20) -> list[User]:
 
 
 async def notify_admins(bot, text: str, reply_markup=None) -> None:
-    for admin_id in sorted(get_settings().admin_ids):
+    for admin_id in sorted(all_admin_ids()):
         try:
             await bot.send_message(
                 admin_id,

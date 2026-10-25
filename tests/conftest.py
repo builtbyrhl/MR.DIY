@@ -3,10 +3,19 @@ import os
 os.environ["BOT_TOKEN"] = "test-token"
 os.environ["ADMIN_IDS"] = "123"
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.db.models import Base, Course, Subject
+from bot.services.auth import set_db_admin_cache
+
+
+@pytest.fixture(autouse=True)
+def reset_db_admin_cache():
+    set_db_admin_cache(set())
+    yield
+    set_db_admin_cache(set())
 
 
 @pytest_asyncio.fixture

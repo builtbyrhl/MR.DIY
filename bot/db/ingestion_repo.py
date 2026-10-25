@@ -13,8 +13,14 @@ from bot.db.models import (
     Lecture,
     SystemSetting,
     Teacher,
+    Topic,
     UploadBatch,
     UploadItem,
+)
+from bot.db.repo import (
+    list_item_topics,
+    replace_item_topics,
+    replace_lecture_topics,
 )
 from bot.errors import ApprovedBatchError
 
@@ -235,6 +241,8 @@ def _recompute_item_status(item: UploadItem) -> None:
         reasons.append("lecture number missing")
     if item.teacher_review_reason:
         reasons.append(item.teacher_review_reason)
+    if item.topic_review_reason:
+        reasons.append(item.topic_review_reason)
     item.status = "needs_review" if reasons else "classified"
     item.review_reason = "; ".join(reasons) if reasons else None
 
@@ -278,6 +286,7 @@ async def set_item_course(
         return None, "Course not found."
     item.course_id = course.id
     await clear_teacher_if_subject_mismatch(session, item, course.subject_id)
+    await clear_topics_if_subject_mismatch(session, item, course.subject_id)
     item.error = None
     _recompute_item_status(item)
     await session.commit()
@@ -302,6 +311,34 @@ async def set_item_number(
     return item, None
 
 
+async def _teacher_assignment_error(
+    session: AsyncSession, item: UploadItem, teacher: Teacher
+) -> Optional[str]:
+    if item.course_id is None:
+        return "Assign a course to this item before assigning a teacher."
+    course = await session.get(Course, item.course_id)
+    if course is None:
+        return "Course not found."
+    if course.subject_id != teacher.subject_id:
+        return "Teacher belongs to a different subject."
+    return None
+
+
+async def _apply_teacher_assignment(
+    session: AsyncSession, item: UploadItem, teacher_id: Optional[int]
+) -> None:
+    item.teacher_id = teacher_id
+    item.teacher_source = "manual"
+    item.teacher_review_reason = None
+    if item.status in {"classified", "needs_review"}:
+        _recompute_item_status(item)
+    lecture = await session.scalar(
+        select(Lecture).where(Lecture.source_upload_item_id == item.id)
+    )
+    if lecture is not None:
+        lecture.teacher_id = teacher_id
+
+
 async def set_item_teacher(
     session: AsyncSession, item_id: int, teacher_id: Optional[int]
 ) -> tuple[Optional[UploadItem], Optional[str]]:
@@ -319,24 +356,219 @@ async def set_item_teacher(
         teacher = await session.get(Teacher, teacher_id)
         if teacher is None:
             return None, "Teacher not found."
-        if item.course_id is None:
-            return None, "Assign a course to this item before assigning a teacher."
-        course = await session.get(Course, item.course_id)
-        if course is None:
-            return None, "Course not found."
-        if course.subject_id != teacher.subject_id:
-            return None, "Teacher belongs to a different subject."
+        error = await _teacher_assignment_error(session, item, teacher)
+        if error:
+            return None, error
 
-    item.teacher_id = teacher_id
-    item.teacher_source = "manual"
-    item.teacher_review_reason = None
-    if item.status in {"classified", "needs_review"}:
-        _recompute_item_status(item)
+    await _apply_teacher_assignment(session, item, teacher_id)
+    await session.commit()
+    await session.refresh(item)
+    return item, None
+
+
+async def set_items_teacher_bulk(
+    session: AsyncSession, item_ids: list[int], teacher_id: int
+) -> tuple[Optional[Teacher], list[UploadItem], list[str]]:
+    """Assign one teacher to many uploads atomically.
+
+    Every item is validated before any metadata changes. A single commit applies
+    all assignments, and validation or commit failures leave the catalogue
+    unchanged.
+    """
+    teacher = await session.get(Teacher, teacher_id)
+    if teacher is None:
+        return None, [], [f"Teacher #{teacher_id} not found."]
+
+    items: list[UploadItem] = []
+    errors: list[str] = []
+    for item_id in item_ids:
+        item = await session.get(UploadItem, item_id)
+        if item is None:
+            errors.append(f"#{item_id}: Item not found.")
+            continue
+        error = await _teacher_assignment_error(session, item, teacher)
+        if error:
+            errors.append(f"#{item_id}: {error}")
+            continue
+        items.append(item)
+
+    if errors:
+        return teacher, [], errors
+
+    for item in items:
+        await _apply_teacher_assignment(session, item, teacher.id)
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    return teacher, items, []
+
+
+async def clear_topics_if_subject_mismatch(
+    session: AsyncSession, item: UploadItem, subject_id: int
+) -> bool:
+    """Drop topic metadata when an upload moves to another subject.
+
+    Topics are subject-scoped. The linked lecture is cleared in the same
+    transaction so projection cannot restore the stale associations.
+    """
+    topics = await list_item_topics(session, item.id) if item.id else []
+    if not topics:
+        return False
+    if all(topic.subject_id == subject_id for topic in topics):
+        return False
+
+    await replace_item_topics(session, item.id, [])
+    item.topic_source = None
+    item.topic_review_reason = None
     lecture = await session.scalar(
         select(Lecture).where(Lecture.source_upload_item_id == item.id)
     )
     if lecture is not None:
-        lecture.teacher_id = teacher_id
+        await replace_lecture_topics(session, lecture.id, [])
+    return True
+
+
+async def set_item_topics(
+    session: AsyncSession, item_id: int, topic_ids: list[int]
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Assign one or more existing topics to an upload item manually.
+
+    Topic assignment is catalogue metadata, so it remains editable after batch
+    approval just like teacher assignment. Clearing with an empty list is also
+    remembered as a manual decision and survives retries.
+    """
+    item = await session.get(UploadItem, item_id)
+    if not item:
+        return None, "Item not found."
+    if item.course_id is None:
+        return None, "Assign a course to this item before assigning a topic."
+    course = await session.get(Course, item.course_id)
+    if course is None:
+        return None, "Course not found."
+
+    topics: list[Topic] = []
+    for topic_id in dict.fromkeys(topic_ids):
+        topic = await session.get(Topic, topic_id)
+        if topic is None:
+            return None, f"Topic #{topic_id} not found."
+        if topic.subject_id != course.subject_id:
+            return None, "Topic belongs to a different subject."
+        topics.append(topic)
+
+    await replace_item_topics(session, item.id, [topic.id for topic in topics])
+    item.topic_source = "manual"
+    item.topic_review_reason = None
+    if item.status in {"classified", "needs_review"}:
+        _recompute_item_status(item)
+
+    lecture = await session.scalar(
+        select(Lecture).where(Lecture.source_upload_item_id == item.id)
+    )
+    if lecture is not None:
+        await replace_lecture_topics(
+            session, lecture.id, [topic.id for topic in topics]
+        )
     await session.commit()
     await session.refresh(item)
+    return item, None
+
+
+async def assign_item(
+    session: AsyncSession,
+    item_id: int,
+    *,
+    course_id: Optional[int] = None,
+    topic_ids: Optional[list[int]] = None,
+    teacher_id: Optional[int] = None,
+    teacher_requested: bool = False,
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Apply several metadata assignments atomically.
+
+    ``None`` means "leave unchanged" for course and topics. For teachers,
+    ``teacher_requested`` distinguishes an unchanged value from an explicit
+    clear. This function never commits; the caller owns the transaction so an
+    error in any part of a bulk assignment can roll back every change.
+    """
+    item = await session.get(UploadItem, item_id)
+    if not item:
+        return None, "Item not found."
+
+    if course_id is not None:
+        await ensure_item_mutable(session, item)
+        course = await session.get(Course, course_id)
+        if course is None:
+            return None, "Course not found."
+    elif item.course_id is not None:
+        course = await session.get(Course, item.course_id)
+    else:
+        course = None
+
+    topics: list[Topic] = []
+    if topic_ids is not None:
+        if course is None:
+            return (
+                None,
+                "Assign a course to this item before assigning a topic.",
+            )
+        for topic_id in dict.fromkeys(topic_ids):
+            topic = await session.get(Topic, topic_id)
+            if topic is None:
+                return None, f"Topic #{topic_id} not found."
+            if topic.subject_id != course.subject_id:
+                return None, "Topic belongs to a different subject."
+            topics.append(topic)
+
+    teacher = None
+    if teacher_requested and teacher_id is not None:
+        if course is None:
+            return (
+                None,
+                "Assign a course to this item before assigning a teacher.",
+            )
+        teacher = await session.get(Teacher, teacher_id)
+        if teacher is None:
+            return None, "Teacher not found."
+        if teacher.subject_id != course.subject_id:
+            return None, "Teacher belongs to a different subject."
+
+    if course_id is not None:
+        item.course_id = course_id
+        await clear_teacher_if_subject_mismatch(
+            session, item, course.subject_id
+        )
+        await clear_topics_if_subject_mismatch(
+            session, item, course.subject_id
+        )
+
+    if topic_ids is not None:
+        await replace_item_topics(
+            session, item.id, [topic.id for topic in topics]
+        )
+        item.topic_source = "manual"
+        item.topic_review_reason = None
+
+    if teacher_requested:
+        item.teacher_id = teacher.id if teacher is not None else None
+        item.teacher_source = "manual"
+        item.teacher_review_reason = None
+
+    item.error = None
+    if item.status in {"classified", "needs_review"}:
+        _recompute_item_status(item)
+
+    lecture = await session.scalar(
+        select(Lecture).where(Lecture.source_upload_item_id == item.id)
+    )
+    if lecture is not None:
+        if teacher_requested:
+            lecture.teacher_id = item.teacher_id
+        if topic_ids is not None:
+            current_topics = await list_item_topics(session, item.id)
+            await replace_lecture_topics(
+                session,
+                lecture.id,
+                [topic.id for topic in current_topics],
+            )
     return item, None

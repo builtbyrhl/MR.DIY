@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.ingestion_repo import (
     clear_teacher_if_subject_mismatch,
+    clear_topics_if_subject_mismatch,
     ensure_item_mutable,
     find_duplicate_file,
     get_item_by_source,
@@ -22,7 +23,8 @@ from bot.db.ingestion_repo import (
     set_setting,
 )
 from bot.db.models import Course, UploadItem
-from bot.db.repo import find_matching_teachers
+from bot.db.repo import find_matching_teachers, find_matching_topics, replace_item_topics
+from bot.errors import ApprovedBatchError
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,21 @@ TEACHER_HONORIFIC = re.compile(
     re.IGNORECASE,
 )
 COURSE_TOKEN = re.compile(r"\w+", re.UNICODE)
+CAPTION_EDIT_BLOCKED_STATUSES = frozenset({"skipped", "publishing", "published"})
+
+
+@dataclass(frozen=True)
+class SlashCaptionCandidate:
+    """One possible interpretation of a four-field slash caption."""
+
+    format: str
+    subject_name: str
+    teacher_name: Optional[str]
+    topic_name: Optional[str]
+    numbers: tuple[int, ...]
+    lecture_title: Optional[str]
+    teacher_missing: bool
+    number_required: bool = True
 
 
 @dataclass
@@ -61,6 +78,22 @@ class ParsedCaption:
     teacher_name: Optional[str] = None
     title_without_teacher: Optional[str] = None
     teacher_explicit: bool = False
+    subject_name: Optional[str] = None
+    topic_name: Optional[str] = None
+    structured: bool = False
+    teacher_missing: bool = False
+    lecture_title: Optional[str] = None
+    caption_format: str = "legacy"
+    format_error: Optional[str] = None
+    ambiguous: bool = False
+    number_required: bool = True
+    slash_candidates: tuple[SlashCaptionCandidate, ...] = ()
+
+
+SLASH_FIELD_COUNT = 4
+LECTURE_FIELD_PREFIX = re.compile(
+    r"^(?:lecture|lec|class|video|part)\b", re.IGNORECASE
+)
 
 
 def _extract_numbers(text: str) -> list[int]:
@@ -68,13 +101,13 @@ def _extract_numbers(text: str) -> list[int]:
     for pattern in LECTURE_PATTERNS:
         for match in pattern.finditer(text):
             number = int(match.group(1))
-            if number not in numbers:
+            if 1 <= number <= 999 and number not in numbers:
                 numbers.append(number)
 
     leading = re.match(r"^\s*(\d{1,3})\s*[.)\-:]\s+", text)
     if leading:
         number = int(leading.group(1))
-        if number not in numbers:
+        if 1 <= number <= 999 and number not in numbers:
             numbers.append(number)
     return numbers
 
@@ -110,8 +143,344 @@ def _split_teacher(title: str) -> tuple[Optional[str], Optional[str], bool]:
     return base, candidate, explicit
 
 
+def _structured_number(text: str) -> list[int]:
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if re.fullmatch(r"\d{1,3}", cleaned):
+        number = int(cleaned)
+        return [number] if 1 <= number <= 999 else []
+    short = re.fullmatch(r"[Ll]\s*(\d{1,3})", cleaned)
+    if short:
+        number = int(short.group(1))
+        return [number] if 1 <= number <= 999 else []
+    return _extract_numbers(cleaned)
+
+
+def _parse_structured_line(
+    line: str,
+) -> Optional[tuple[str, str, list[int], Optional[str], Optional[str], bool]]:
+    """Parse ``Subject | Topic | Lecture Number | Teacher``.
+
+    Returns ``(subject, topic, numbers, teacher, title, teacher_missing)`` or
+    ``None`` when the line does not have a valid structured lecture-number
+    field. Requiring a number in the third field prevents legacy captions such
+    as ``Lecture 10: Pathophysiology | Dr Sharma`` from being reinterpreted.
+    """
+    parts = [part.strip() for part in line.split("|")]
+    if len(parts) < 3:
+        return None
+
+    numbers = _structured_number(parts[2])
+    if not numbers:
+        return None
+
+    subject = " ".join(parts[0].split()) or None
+    topic = " ".join(parts[1].split()) or None
+    teacher_raw = " | ".join(parts[3:]).strip(" \t-—–:|,;")
+    teacher_name = None
+    teacher_missing = True
+    if teacher_raw:
+        candidate = teacher_raw
+        label = TEACHER_LABEL_PREFIX.match(candidate)
+        if label:
+            candidate = candidate[label.end() :].strip(" \t-—–:|,;")
+        if len(candidate) >= 2:
+            teacher_name = candidate
+            teacher_missing = False
+
+    title = topic or subject or "Untitled"
+    return subject, topic, numbers, teacher_name, title, teacher_missing
+
+
+def _clean_field(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _teacher_field(value: str) -> tuple[Optional[str], bool]:
+    candidate = _clean_field(value).strip(" \t---:|,;")
+    if not candidate:
+        return None, True
+    label = TEACHER_LABEL_PREFIX.match(candidate)
+    if label:
+        candidate = candidate[label.end() :].strip(" \t---:|,;")
+    if len(candidate) < 2:
+        return None, True
+    return candidate[:128], False
+
+
+def _number_and_title(value: str) -> tuple[list[int], Optional[str]]:
+    """Return positive lecture numbers and an optional title suffix.
+
+    The lecture field is intentionally strict: it must start with a number,
+    ``L<n>``, or a spoken prefix such as ``Lecture``/``Class``. Arbitrary
+    numeric text in a title is not treated as a lecture number.
+    """
+    cleaned = _clean_field(value)
+    if not cleaned:
+        return [], None
+
+    short = re.fullmatch(r"[Ll]\s*(\d{1,3})", cleaned)
+    if short:
+        number = int(short.group(1))
+        return ([number], None) if 1 <= number <= 999 else ([], None)
+
+    numbers = _extract_numbers(cleaned)
+    if len(numbers) > 1:
+        return numbers, None
+    match = re.match(
+        r"^(?:(?:lecture|lec|class|video|part)\s*[-:#.]?\s*)?"
+        r"(\d{1,3})(?![0-9A-Za-z])\s*[.)\-:–—]?\s*(.*)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if not match:
+        return numbers, None
+    number = int(match.group(1))
+    if not 1 <= number <= 999:
+        return [], None
+    remainder = _clean_field(match.group(2)).strip(" \t---:|,;")
+    return [number], remainder or None
+
+
+def _looks_like_lecture_field(value: str) -> bool:
+    return bool(LECTURE_FIELD_PREFIX.match(_clean_field(value)))
+
+
+def _looks_like_teacher_field(value: str) -> bool:
+    cleaned = _clean_field(value)
+    return bool(
+        TEACHER_LABEL_PREFIX.match(cleaned)
+        or TEACHER_HONORIFIC.match(cleaned)
+    )
+
+
+def _normalized_phrase(value: str) -> str:
+    return " ".join(
+        re.sub(r"[^\w\s]", " ", value or "").casefold().split()
+    )
+
+
+def _preferred_video_title_error(
+    title: Optional[str], subject: str, topic: str
+) -> Optional[str]:
+    clean = _clean_field(title or "")
+    if not clean:
+        return "video title missing"
+    numbers, remainder = _number_and_title(clean)
+    if _looks_like_lecture_field(clean) or (numbers and remainder is None):
+        return f"generic video title: {clean}"
+    normalized = _normalized_phrase(clean)
+    generic = {
+        _normalized_phrase(subject),
+        _normalized_phrase(topic),
+    } - {""}
+    if normalized in generic:
+        return f"generic video title: {clean}"
+    return None
+
+
+def _slash_candidate(
+    *,
+    format: str,
+    subject: str,
+    teacher_raw: str,
+    topic: str,
+    numbers: list[int],
+    lecture_title: Optional[str],
+    number_required: bool = True,
+) -> SlashCaptionCandidate:
+    teacher, teacher_missing = _teacher_field(teacher_raw)
+    return SlashCaptionCandidate(
+        format=format,
+        subject_name=_clean_field(subject),
+        teacher_name=teacher,
+        topic_name=_clean_field(topic) or None,
+        numbers=tuple(numbers),
+        lecture_title=lecture_title,
+        teacher_missing=teacher_missing,
+        number_required=number_required,
+    )
+
+
+def _parsed_from_slash_candidate(
+    candidate: SlashCaptionCandidate,
+    *,
+    raw_line: str,
+    format_error: Optional[str] = None,
+    ambiguous: bool = False,
+) -> ParsedCaption:
+    numbers = list(candidate.numbers)
+    number_ambiguous = len(numbers) > 1
+    lecture_number = numbers[0] if len(numbers) == 1 else None
+    title = (
+        candidate.lecture_title
+        or candidate.topic_name
+        or candidate.subject_name
+        or raw_line
+        or "Untitled"
+    )
+    return ParsedCaption(
+        title=title[:256],
+        lecture_number=lecture_number,
+        number_ambiguous=number_ambiguous,
+        numbers=numbers,
+        teacher_name=candidate.teacher_name,
+        teacher_explicit=(
+            candidate.teacher_name is not None and not candidate.teacher_missing
+        ),
+        subject_name=candidate.subject_name or None,
+        topic_name=candidate.topic_name,
+        structured=True,
+        teacher_missing=candidate.teacher_missing,
+        lecture_title=candidate.lecture_title,
+        caption_format=candidate.format,
+        format_error=format_error,
+        ambiguous=ambiguous,
+        number_required=candidate.number_required,
+    )
+
+
+def _ambiguous_slash_caption(
+    line: str,
+    preferred: SlashCaptionCandidate,
+    legacy: SlashCaptionCandidate,
+    numbers: list[int],
+) -> ParsedCaption:
+    return ParsedCaption(
+        title=line[:256],
+        lecture_number=None,
+        number_ambiguous=bool(numbers),
+        numbers=numbers,
+        structured=True,
+        ambiguous=True,
+        caption_format="slash_ambiguous",
+        format_error=(
+            "ambiguous slash caption format: fields could match both the "
+            "current and legacy layouts"
+        ),
+        slash_candidates=(preferred, legacy),
+    )
+
+
+def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
+    parts = [part.strip() for part in line.split("/")]
+    if len(parts) != SLASH_FIELD_COUNT:
+        return None
+
+    video_title = _clean_field(parts[3])
+    legacy_numbers, legacy_title = _number_and_title(parts[2])
+    preferred_number_like, _ = _number_and_title(parts[3])
+    preferred = _slash_candidate(
+        format="slash_preferred",
+        subject=parts[0],
+        teacher_raw=parts[1],
+        topic=parts[2],
+        numbers=[],
+        lecture_title=video_title or None,
+        number_required=False,
+    )
+    legacy = _slash_candidate(
+        format="slash_legacy",
+        subject=parts[0],
+        teacher_raw=parts[3],
+        topic=parts[1],
+        numbers=legacy_numbers,
+        lecture_title=legacy_title,
+        number_required=True,
+    )
+
+    second_teacher = _looks_like_teacher_field(parts[1])
+    fourth_teacher = _looks_like_teacher_field(parts[3])
+    third_lecture = bool(legacy_numbers) or _looks_like_lecture_field(parts[2])
+    fourth_lecture = bool(preferred_number_like) or _looks_like_lecture_field(
+        parts[3]
+    )
+
+    if second_teacher and fourth_teacher:
+        return _ambiguous_slash_caption(
+            line,
+            preferred,
+            legacy,
+            sorted(set(legacy_numbers + preferred_number_like)),
+        )
+    if fourth_teacher:
+        if legacy_numbers:
+            return _parsed_from_slash_candidate(legacy, raw_line=line)
+        error = (
+            f"invalid lecture number: {parts[2]}"
+            if third_lecture
+            else "lecture number missing"
+        )
+        return _parsed_from_slash_candidate(
+            legacy, raw_line=line, format_error=error
+        )
+    if second_teacher:
+        return _parsed_from_slash_candidate(
+            preferred,
+            raw_line=line,
+            format_error=_preferred_video_title_error(
+                video_title, parts[0], parts[2]
+            ),
+        )
+
+    if legacy_numbers and fourth_lecture:
+        return _ambiguous_slash_caption(
+            line,
+            preferred,
+            legacy,
+            sorted(set(legacy_numbers + preferred_number_like)),
+        )
+    if legacy_numbers:
+        return _parsed_from_slash_candidate(legacy, raw_line=line)
+    if third_lecture:
+        return _parsed_from_slash_candidate(
+            legacy,
+            raw_line=line,
+            format_error=f"invalid lecture number: {parts[2]}",
+        )
+
+    return _parsed_from_slash_candidate(
+        preferred,
+        raw_line=line,
+        format_error=_preferred_video_title_error(
+            video_title, parts[0], parts[2]
+        ),
+    )
+
+
 def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCaption:
     text = (caption or "").strip()
+
+    first_line = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+
+    if "|" in first_line:
+        structured = _parse_structured_line(first_line)
+        if structured is not None:
+            subject, topic, numbers, teacher, title, teacher_missing = structured
+            return ParsedCaption(
+                title=title[:256],
+                lecture_number=numbers[0] if len(numbers) == 1 else None,
+                number_ambiguous=len(numbers) > 1,
+                numbers=numbers,
+                teacher_name=teacher,
+                teacher_explicit=teacher is not None,
+                subject_name=subject,
+                topic_name=topic,
+                structured=True,
+                teacher_missing=teacher_missing,
+                caption_format="pipe",
+            )
+    if "/" in first_line:
+        slash = _parse_slash_line(first_line)
+        if slash is not None:
+            return slash
+
     numbers = _extract_numbers(text)
     if not numbers and file_name:
         stem = os.path.splitext(os.path.basename(file_name))[0].strip()
@@ -207,18 +576,92 @@ def match_courses(courses: list[Course], text: str) -> list[Course]:
     return exact or prefix
 
 
+async def _select_slash_candidate(
+    session: AsyncSession,
+    courses: list[Course],
+    candidates: tuple[SlashCaptionCandidate, ...],
+) -> Optional[SlashCaptionCandidate]:
+    """Use existing records to resolve a numerically ambiguous slash caption."""
+    fully_resolved: list[SlashCaptionCandidate] = []
+    for candidate in candidates:
+        if (
+            candidate.teacher_missing
+            or candidate.teacher_name is None
+            or candidate.topic_name is None
+            or (
+                candidate.number_required
+                and len(candidate.numbers) != 1
+            )
+        ):
+            continue
+        if candidate.format == "slash_preferred" and _preferred_video_title_error(
+            candidate.lecture_title,
+            candidate.subject_name,
+            candidate.topic_name or "",
+        ):
+            continue
+        course_matches = match_courses(courses, candidate.subject_name)
+        if len(course_matches) != 1:
+            continue
+        subject_id = course_matches[0].subject_id
+        teachers = await find_matching_teachers(
+            session, subject_id, candidate.teacher_name
+        )
+        topics = await find_matching_topics(
+            session, subject_id, candidate.topic_name
+        )
+        if len(teachers) == 1 and len(topics) == 1:
+            fully_resolved.append(candidate)
+    if len(fully_resolved) == 1:
+        return fully_resolved[0]
+    return None
+
+
 async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
     parsed = parse_caption(item.raw_caption, item.file_name)
+    courses = await list_courses(session)
+
+    if parsed.slash_candidates:
+        selected = await _select_slash_candidate(
+            session, courses, parsed.slash_candidates
+        )
+        if selected is not None:
+            parsed = _parsed_from_slash_candidate(
+                selected,
+                raw_line=(item.raw_caption or "").strip(),
+            )
+        else:
+            parsed = ParsedCaption(
+                title=parsed.title,
+                lecture_number=None,
+                number_ambiguous=True,
+                numbers=parsed.numbers,
+                structured=True,
+                ambiguous=True,
+                caption_format="slash_ambiguous",
+                format_error=(
+                    parsed.format_error
+                    or "ambiguous slash caption format: existing records "
+                    "do not uniquely resolve the fields"
+                ),
+            )
+
     item.title = parsed.title
     item.lecture_number = parsed.lecture_number
 
-    text = " ".join(part for part in (item.raw_caption, item.file_name, item.title) if part)
-    courses = await list_courses(session)
-    matches = match_courses(courses, text)
+    if parsed.structured:
+        match_text = parsed.subject_name or ""
+    else:
+        match_text = " ".join(
+            part for part in (item.raw_caption, item.file_name, item.title) if part
+        )
+    matches = match_courses(courses, match_text)
 
     reasons: list[str] = []
     if item.duplicate_flag:
         reasons.append("suspected duplicate file")
+    if parsed.format_error:
+        reasons.append(parsed.format_error)
 
     course = None
     if len(matches) == 0:
@@ -238,25 +681,38 @@ async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
                 "course reclassification",
                 item.id,
             )
+        await clear_topics_if_subject_mismatch(
+            session, item, course.subject_id
+        )
 
     teacher_reason = None
     auto_teacher_id = None
+    manual_teacher = item.teacher_source == "manual" or (
+        item.teacher_id is not None and item.teacher_source is None
+    )
     if course is None:
-        if item.teacher_source == "auto":
-            item.teacher_id = None
-            item.teacher_source = None
-        if (
-            parsed.teacher_name
-            and parsed.teacher_explicit
-            and item.teacher_id is None
-        ):
-            teacher_reason = "teacher not resolved: subject not uniquely identified"
-    else:
-        manual_teacher = item.teacher_source == "manual" or (
-            item.teacher_id is not None and item.teacher_source is None
-        )
         if not manual_teacher:
-            if parsed.teacher_name:
+            if item.teacher_source == "auto":
+                item.teacher_id = None
+                item.teacher_source = None
+            if parsed.teacher_missing:
+                teacher_reason = "teacher missing"
+            elif (
+                parsed.teacher_name
+                and parsed.teacher_explicit
+                and item.teacher_id is None
+            ):
+                teacher_reason = (
+                    "teacher not resolved: subject not uniquely identified"
+                )
+    else:
+        if not manual_teacher:
+            if parsed.teacher_missing:
+                if item.teacher_source == "auto":
+                    item.teacher_id = None
+                    item.teacher_source = None
+                teacher_reason = "teacher missing"
+            elif parsed.teacher_name:
                 teachers = await find_matching_teachers(
                     session, course.subject_id, parsed.teacher_name
                 )
@@ -290,9 +746,54 @@ async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
     ):
         item.title = parsed.title_without_teacher[:256]
 
+    manual_topic = item.topic_source == "manual"
+    topic_reason = None
+    if parsed.structured:
+        if not manual_topic:
+            if not parsed.topic_name:
+                await replace_item_topics(session, item.id, [])
+                item.topic_source = None
+                topic_reason = "topic missing"
+            elif course is None:
+                await replace_item_topics(session, item.id, [])
+                item.topic_source = None
+                topic_reason = (
+                    "topic not resolved: subject not uniquely identified"
+                )
+            else:
+                topics = await find_matching_topics(
+                    session, course.subject_id, parsed.topic_name
+                )
+                if len(topics) == 1:
+                    await replace_item_topics(
+                        session, item.id, [topics[0].id]
+                    )
+                    item.topic_source = "auto"
+                    item.title = (
+                        parsed.lecture_title or topics[0].name
+                    )[:256]
+                else:
+                    await replace_item_topics(session, item.id, [])
+                    item.topic_source = None
+                    if len(topics) > 1:
+                        topic_reason = (
+                            f"ambiguous topic: {parsed.topic_name}"
+                        )
+                    else:
+                        topic_reason = (
+                            f"topic not found: {parsed.topic_name}"
+                        )
+    elif not manual_topic:
+        await replace_item_topics(session, item.id, [])
+        item.topic_source = None
+
+    item.topic_review_reason = topic_reason
+    if topic_reason:
+        reasons.append(topic_reason)
+
     if parsed.number_ambiguous:
         reasons.append("ambiguous lecture number")
-    elif parsed.lecture_number is None:
+    elif parsed.lecture_number is None and parsed.number_required:
         reasons.append("lecture number missing")
 
     item.review_reason = "; ".join(reasons) if reasons else None
@@ -333,6 +834,7 @@ async def ingest_media(
         file_id=file_id,
         file_unique_id=file_unique_id,
         raw_caption=caption,
+        original_caption=caption,
         title=parsed.title,
         lecture_number=parsed.lecture_number,
         status="paused" if paused else "received",
@@ -390,6 +892,7 @@ async def retry_item(session: AsyncSession, item_id: int) -> Optional[UploadItem
     item.error = None
     item.review_reason = None
     item.teacher_review_reason = None
+    item.topic_review_reason = None
     if item.file_unique_id:
         duplicate = await find_duplicate_file(
             session, item.file_unique_id, item.id, item.source_chat_id, item.media_type
@@ -404,6 +907,96 @@ async def retry_item(session: AsyncSession, item_id: int) -> Optional[UploadItem
     return item
 
 
+async def _replace_item_caption(
+    session: AsyncSession,
+    item: UploadItem,
+    caption: Optional[str],
+    *,
+    allow_empty: bool,
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    clean_caption = (caption or "").strip()
+    if not clean_caption and not allow_empty:
+        return None, "Caption is required."
+
+    if item.original_caption is None:
+        item.original_caption = item.raw_caption
+    item.raw_caption = clean_caption or None
+    item.status = "received"
+    item.error = None
+    item.review_reason = None
+    item.teacher_review_reason = None
+    item.topic_review_reason = None
+    await session.commit()
+
+    await classify_item(session, item)
+    await session.commit()
+    await session.refresh(item)
+    return item, None
+
+
+async def set_item_caption(
+    session: AsyncSession, item_id: int, caption: str
+) -> tuple[Optional[UploadItem], Optional[str]]:
+    """Edit an unapproved item's caption and reclassify it safely.
+
+    The first edit preserves the previous caption in ``original_caption`` so
+    the original metadata remains available for audit and recovery.
+    """
+    item = await session.get(UploadItem, item_id)
+    if not item:
+        return None, "Item not found."
+    await ensure_item_mutable(session, item)
+    if item.status == "skipped":
+        return None, "Item is skipped. Use /keep to restore it before editing the caption."
+    return await _replace_item_caption(
+        session, item, caption, allow_empty=False
+    )
+
+
+async def update_ingested_caption(
+    session: AsyncSession,
+    *,
+    source_chat_id: int,
+    source_message_id: int,
+    caption: Optional[str],
+) -> tuple[Optional[UploadItem], str]:
+    """Apply a Telegram caption edit to an existing upload.
+
+    Only metadata for an already stored, mutable item is changed. Approved,
+    skipped, publishing, or published items are left untouched. Missing items
+    are not created from an edit event.
+    """
+    item = await get_item_by_source(
+        session, source_chat_id, source_message_id
+    )
+    if item is None:
+        return None, "not_ingested"
+
+    clean_caption = (caption or "").strip()
+    if (item.raw_caption or "").strip() == clean_caption:
+        return item, "unchanged"
+
+    if item.status == "skipped":
+        return item, "skipped"
+    if (
+        item.status in CAPTION_EDIT_BLOCKED_STATUSES
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return item, "published"
+
+    try:
+        await ensure_item_mutable(session, item)
+    except ApprovedBatchError:
+        return item, "approved"
+
+    item, error = await _replace_item_caption(
+        session, item, caption, allow_empty=True
+    )
+    if error:
+        return item, "error"
+    return item, "updated"
+
+
 async def keep_item(session: AsyncSession, item_id: int) -> Optional[UploadItem]:
     item = await session.get(UploadItem, item_id)
     if not item:
@@ -414,6 +1007,7 @@ async def keep_item(session: AsyncSession, item_id: int) -> Optional[UploadItem]
     item.status = "received"
     item.review_reason = None
     item.teacher_review_reason = None
+    item.topic_review_reason = None
     await session.commit()
     await classify_item(session, item)
     await session.commit()

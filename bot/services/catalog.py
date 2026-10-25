@@ -7,7 +7,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Course, Lecture, Teacher, UploadItem
-from bot.db.repo import list_subjects
+from bot.db.repo import (
+    list_item_topics,
+    list_subjects,
+    replace_lecture_topics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +116,10 @@ async def project_upload_to_lecture(
         lecture.order = (max_order or 0) + 1
 
     await session.flush()
+    topics = await list_item_topics(session, item.id)
+    await replace_lecture_topics(
+        session, lecture.id, [topic.id for topic in topics]
+    )
     return lecture, created
 
 

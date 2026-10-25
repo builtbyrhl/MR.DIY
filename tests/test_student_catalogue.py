@@ -224,9 +224,11 @@ async def test_subject_callback_lists_projected_uploads_in_order(
             select(Lecture).where(Lecture.subject_id == subject.id).order_by(Lecture.order)
         )
     ).all()
-    assert lecture_ids == [f"lec:{lecture.id}" for lecture in lectures]
-    assert lecture_ids[0] == f"lec:{earlier.id}"
-    assert lecture_ids[1] == f"lec:{later.id}"
+    assert lecture_ids == [
+        f"lec:{lecture.id}:tch:{subject.id}:0:0" for lecture in lectures
+    ]
+    assert lecture_ids[0] == f"lec:{earlier.id}:tch:{subject.id}:0:0"
+    assert lecture_ids[1] == f"lec:{later.id}:tch:{subject.id}:0:0"
     cb.answer.assert_awaited_once_with()
     cb_lectures.answer.assert_awaited_once_with()
 

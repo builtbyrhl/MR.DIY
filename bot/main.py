@@ -13,6 +13,7 @@ from bot.config import get_settings
 from bot.db.session import get_session_factory, init_db
 from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.services.auth import load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
 
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, access, admin, channel, review, ingest
@@ -25,8 +26,10 @@ def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     # middlewares
     dp.message.middleware(DbMiddleware())
+    dp.edited_message.middleware(DbMiddleware())
     dp.callback_query.middleware(DbMiddleware())
     dp.message.middleware(ThrottlingMiddleware())
+    dp.edited_message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
     # routers
     for r in (start.router, subjects.router, lectures.router, bookmarks.router,
@@ -40,8 +43,14 @@ async def on_startup(bot: Bot):
     await init_db()
     logger.info("DB initialized")
     async with get_session_factory()() as session:
+        admin_ids = await load_db_admin_cache(session)
         created = await sync_published_uploads_to_catalog(session)
-    logger.info("Student catalogue synced (%s new lectures)", created)
+    logger.info(
+        "Admin cache loaded (%s database admins); student catalogue synced "
+        "(%s new lectures)",
+        len(admin_ids),
+        created,
+    )
 
 
 async def run_polling():
@@ -62,7 +71,7 @@ async def run_polling():
         site = web.TCPSite(runner, settings.host, settings.port)
         await site.start()
         logger.info("Health server running on %s:%s", settings.host, settings.port)
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"], drop_pending_updates=True)
+    await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
 
 
 async def run_webhook():
@@ -70,7 +79,7 @@ async def run_webhook():
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = build_dispatcher()
     await on_startup(bot)
-    await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "callback_query", "chat_member"])
+    await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
     app = web.Application()
     async def handle_webhook(request):
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:

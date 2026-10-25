@@ -6,12 +6,14 @@ from typing import Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Column,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
     func,
@@ -48,6 +50,26 @@ class User(Base):
     bookmarks: Mapped[list["Bookmark"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+class AdminUser(Base):
+    """A database-granted administrator.
+
+    ``ADMIN_IDS`` remains the immutable owner/superadmin list. Admins granted
+    from the bot are stored here so they can be added or removed without a
+    deployment, while owners cannot be removed accidentally from chat.
+    """
+
+    __tablename__ = "admin_users"
+    __table_args__ = (Index("ix_admin_users_granted_by", "granted_by"),)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    granted_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 
@@ -58,6 +80,7 @@ class Subject(Base):
     order: Mapped[int] = mapped_column(Integer, default=0)
 
     lectures: Mapped[list["Lecture"]] = relationship(back_populates="subject", cascade="all, delete-orphan")
+    topics: Mapped[list["Topic"]] = relationship(back_populates="subject", cascade="all, delete-orphan")
 
 
 class Teacher(Base):
@@ -74,6 +97,85 @@ class Teacher(Base):
     name: Mapped[str] = mapped_column(String(128))
     normalized_name: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TeacherAlias(Base):
+    """Explicit alternate spelling for a subject-scoped teacher."""
+
+    __tablename__ = "teacher_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id",
+            "normalized_name",
+            name="uq_teacher_alias_subject_normalized_name",
+        ),
+        Index("ix_teacher_aliases_teacher", "teacher_id"),
+        Index("ix_teacher_aliases_subject", "subject_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    teacher_id: Mapped[int] = mapped_column(
+        ForeignKey("teachers.id", ondelete="CASCADE")
+    )
+    subject_id: Mapped[int] = mapped_column(
+        ForeignKey("subjects.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    normalized_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Topic(Base):
+    __tablename__ = "topics"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "normalized_name", name="uq_topic_subject_normalized_name"
+        ),
+        Index("ix_topics_subject", "subject_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject_id: Mapped[int] = mapped_column(
+        ForeignKey("subjects.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    normalized_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    subject: Mapped["Subject"] = relationship(back_populates="topics")
+
+
+upload_item_topics = Table(
+    "upload_item_topics",
+    Base.metadata,
+    Column(
+        "upload_item_id",
+        ForeignKey("upload_items.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "topic_id",
+        ForeignKey("topics.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_upload_item_topics_topic", "topic_id"),
+)
+
+lecture_topics = Table(
+    "lecture_topics",
+    Base.metadata,
+    Column(
+        "lecture_id",
+        ForeignKey("lectures.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "topic_id",
+        ForeignKey("topics.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_lecture_topics_topic", "topic_id"),
+)
 
 
 class Lecture(Base):
@@ -210,6 +312,7 @@ class UploadItem(Base):
     file_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     file_unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     raw_caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    original_caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     lecture_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
@@ -218,6 +321,8 @@ class UploadItem(Base):
     )
     teacher_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     teacher_review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    topic_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    topic_review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="received")
     publication_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

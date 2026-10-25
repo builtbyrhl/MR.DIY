@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from bot.db.ingestion_repo import approve_batch, set_item_teacher
 from bot.db.models import Course, Lecture, Subject
-from bot.db.repo import add_teacher
+from bot.db.repo import add_teacher, add_teacher_alias
 from bot.handlers import review
 from bot.services.catalog import sync_published_uploads_to_catalog
 from bot.services.ingestion import ingest_media, retry_item
@@ -183,6 +183,39 @@ async def test_retry_assigns_teacher_added_after_unknown_candidate(session):
     assert item.status == "needs_review"
 
     teacher = await _teacher(session, subject.id, "Dr Sharma")
+    item = await retry_item(session, item.id)
+
+    assert item.teacher_id == teacher.id
+    assert item.teacher_source == "auto"
+    assert item.teacher_review_reason is None
+    assert item.status == "classified"
+
+
+async def test_retry_assigns_teacher_after_alias_is_added(session):
+    subject, _course = await _subject_course(
+        session,
+        slug="anatomy",
+        subject_name="Anatomy",
+        course_name="Anatomy",
+        aliases="anatomy",
+    )
+    teacher = await _teacher(session, subject.id, "Dr. Muhammad Azam")
+
+    item = await _ingest(
+        session,
+        "Lecture 1: Anatomy — Dr Mohammad Azam",
+        message_id=12,
+    )
+    assert item.teacher_id is None
+    assert item.status == "needs_review"
+    assert item.teacher_review_reason == "teacher not found: Dr Mohammad Azam"
+
+    alias, error = await add_teacher_alias(
+        session, teacher.id, "Dr Mohammad Azam"
+    )
+    assert error is None
+    assert alias is not None
+
     item = await retry_item(session, item.id)
 
     assert item.teacher_id == teacher.id

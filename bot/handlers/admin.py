@@ -7,16 +7,27 @@ from aiogram.types import Message, ReplyParameters
 from aiogram.filters import Command
 from sqlalchemy.exc import IntegrityError
 
-from bot.config import get_settings
-from bot.db.repo import grant_premium
-from bot.db.session import get_session_factory
+from bot.db.repo import (
+    add_db_admin,
+    grant_premium,
+    list_db_admins,
+    remove_db_admin,
+)
+from bot.services.auth import (
+    all_admin_ids,
+    db_admin_ids,
+    is_admin,
+    is_owner,
+    load_db_admin_cache,
+    owner_ids,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
-def is_admin(user_id: int) -> bool:
-    return user_id in get_settings().admin_ids
+def _is_private_chat(message: Message) -> bool:
+    return getattr(getattr(message, "chat", None), "type", None) == "private"
 
 
 @router.message(Command("admin"))
@@ -36,19 +47,38 @@ async def admin_panel(message: Message):
         "/rejectuser <user_id>\n"
         "/revokeuser <user_id>\n\n"
         "Upload catalogue:\n"
+        "Caption: Subject / Teacher / Topic / Video Title\n"
+        "Legacy: Subject / Topic / Lecture Number / Teacher or "
+        "Subject | Topic | Lecture Number | Teacher\n"
         "/addcourse <subject_slug>|<name>|[aliases]|[dest]|[topic]\n"
         "/courses\n"
-        "/addteacher <subject_slug>|<name>\n"
+        "/addteacher <subject_slug>|<name>|[alias1,alias2]\n"
         "/teachers <subject_slug>\n"
+        "/teacheralias <teacher_id>|<alias>\n"
+        "/removealias <teacher_id>|<alias>\n"
+        "/renameteacher <teacher_id>|<new name>\n"
         "/setteacher <item_id>|<teacher_id|none>\n"
+        "/setteacherbulk <item_ids>|<teacher_id>\n"
         "/setlectureteacher <lecture_id>|<teacher_id|none>\n"
+        "/setlecturetitle <lecture_id>|<title> - no re-upload\n"
+        "/addtopic <subject_slug>|<name>\n"
+        "/topics <subject_slug>\n"
+        "/settopic <item_ids>|<topic_ids|none>\n"
+        "/setlecturetopic <lecture_id>|<topic_ids|none>\n"
+        "/assign <item_ids>|<course|->|<topics|none|->|<teacher|none|->\n"
+        "/setcaption <item_id>|<caption> — reclassify an unapproved item\n"
         "/review\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
         "/publish <id>\n"
-        "/unlockpublish <item> — after verifying an uncertain publish\n"
+        "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"
+        "/unlockpublish <item> — only if the message does not exist\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
         "/pause · /resume\n"
-        "/whereami",
+        "/whereami\n\n"
+        "Admins (private chat only):\n"
+        "/admins\n"
+        "/addadmin <user_id> — owner only\n"
+        "/removeadmin <user_id> — owner only",
         parse_mode=None,
     )
 
@@ -67,6 +97,7 @@ async def whereami_cmd(message: Message):
     thread_id = getattr(message, "message_thread_id", None)
     title = getattr(chat, "title", None) or getattr(chat, "type", "unknown")
     text = (
+        f"user.id: {sender.id}\n"
         f"chat.id: {chat.id}\n"
         f"message_thread_id: {thread_id if thread_id is not None else 'None'}\n"
         f"chat title: {title}"
@@ -197,3 +228,97 @@ async def stats_cmd(message: Message, session):
     u = await session.execute(select(func.count(User.id)))
     l = await session.execute(select(func.count(Lecture.id)))
     await message.answer(f"Users: {u.scalar()}\nLectures: {l.scalar()}")
+
+
+@router.message(Command("admins"))
+async def admins_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    if not _is_private_chat(message):
+        await message.answer("Use /admins in a private chat.")
+        return
+    db_admins = await list_db_admins(session)
+    lines = [
+        "Owners (ADMIN_IDS, cannot be removed from chat):",
+        ", ".join(str(uid) for uid in sorted(owner_ids())) or "none",
+        "",
+        "Database-granted admins:",
+        ", ".join(str(row.user_id) for row in db_admins) or "none",
+    ]
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("addadmin"))
+async def addadmin_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    if not is_owner(message.from_user.id):
+        await message.answer("Only owner admins can add administrators.")
+        return
+    if not _is_private_chat(message):
+        await message.answer("Use /addadmin in a private chat.")
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Usage: /addadmin <user_id>")
+        return
+    try:
+        user_id = int(args[1])
+    except ValueError:
+        await message.answer("User ID must be a number.")
+        return
+    if user_id <= 0:
+        await message.answer("User ID must be a positive number.")
+        return
+    if user_id in owner_ids():
+        await message.answer(f"User {user_id} is already an owner admin.")
+        return
+    admin, error = await add_db_admin(
+        session, user_id, granted_by=message.from_user.id
+    )
+    if error:
+        await message.answer(error)
+        return
+    await load_db_admin_cache(session)
+    await message.answer(
+        f"Granted administrator access to {user_id}. "
+        "They must start the bot and use /admin."
+    )
+
+
+@router.message(Command("removeadmin"))
+async def removeadmin_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    if not is_owner(message.from_user.id):
+        await message.answer("Only owner admins can remove administrators.")
+        return
+    if not _is_private_chat(message):
+        await message.answer("Use /removeadmin in a private chat.")
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Usage: /removeadmin <user_id>")
+        return
+    try:
+        user_id = int(args[1])
+    except ValueError:
+        await message.answer("User ID must be a number.")
+        return
+    if is_owner(user_id):
+        await message.answer(
+            "Owner admins come from ADMIN_IDS and cannot be removed here."
+        )
+        return
+    if user_id not in db_admin_ids():
+        await message.answer("User is not a database-granted admin.")
+        return
+    if len(all_admin_ids()) <= 1:
+        await message.answer("Cannot remove the last remaining administrator.")
+        return
+    _, error = await remove_db_admin(session, user_id)
+    if error:
+        await message.answer(error)
+        return
+    await load_db_admin_cache(session)
+    await message.answer(f"Removed administrator access from {user_id}.")

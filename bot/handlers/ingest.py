@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.types import Message
 
 from bot.config import get_settings
-from bot.services.ingestion import ingest_media
+from bot.services.ingestion import ingest_media, update_ingested_caption
 from bot.utils.telegram import chat_matches
 
 router = Router()
@@ -64,6 +64,50 @@ async def ingest_message(message: Message, session):
         "Stored upload item #%s in batch #%s status=%s reason=%s",
         item.id,
         item.batch_id,
+        item.status,
+        item.review_reason,
+    )
+
+
+@router.edited_message(F.video | F.document)
+async def ingest_edited_message(message: Message, session):
+    settings = get_settings()
+    if not chat_matches(settings.upload_inbox_chat_id, message.chat):
+        return
+
+    media = message.video or message.document
+    if media is None:
+        return
+
+    try:
+        item, outcome = await update_ingested_caption(
+            session,
+            source_chat_id=message.chat.id,
+            source_message_id=message.message_id,
+            caption=message.caption,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to update edited upload chat=%s message=%s media=%s",
+            message.chat.id,
+            message.message_id,
+            "video" if message.video else "document",
+        )
+        raise
+
+    if item is None:
+        logger.info(
+            "Ignored edited upload chat=%s message=%s: %s",
+            message.chat.id,
+            message.message_id,
+            outcome,
+        )
+        return
+
+    logger.info(
+        "Edited upload item #%s outcome=%s status=%s reason=%s",
+        item.id,
+        outcome,
         item.status,
         item.review_reason,
     )

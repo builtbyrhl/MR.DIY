@@ -150,14 +150,14 @@ async def test_subject_shows_only_its_teachers_with_counts_and_unspecified(
     labels = _button_labels(markup)
 
     assert "Progress: 0/4" in text
-    assert "Choose a teacher:" in text
+    assert "Choose a teacher to open their lectures." in text
     assert f"tlec:{biochemistry.id}:{sharma.id}:0" in data
     assert f"tlec:{biochemistry.id}:{rao.id}:0" in data
     assert f"tlec:{biochemistry.id}:0:0" in data
     assert all(f":{other.id}:" not in value for value in data)
-    assert "Dr. A Sharma (2)" in labels
-    assert "Dr B Rao (1)" in labels
-    assert f"{TEACHER_UNSPECIFIED} (1)" in labels
+    assert "Dr. A Sharma · 2" in labels
+    assert "Dr B Rao · 1" in labels
+    assert f"{TEACHER_UNSPECIFIED} · 1" in labels
     assert max(_callback_lengths(markup)) <= 64
     cb.answer.assert_awaited_once_with()
 
@@ -187,16 +187,19 @@ async def test_teacher_selection_filters_and_orders_lectures(
     data = _button_data(markup)
     lecture_ids = [value for value in data if value.startswith("lec:")]
 
+    def _context(lecture_id: int) -> str:
+        return f"lec:{lecture_id}:tch:{biochemistry.id}:{sharma.id}:0"
+
     assert "A Sharma" in text
-    assert f"lec:{earlier.id}" in lecture_ids
-    assert f"lec:{later.id}" in lecture_ids
-    assert f"lec:{premium.id}" in lecture_ids
-    assert f"lec:{other.id}" not in lecture_ids
-    assert f"lec:{unspecified.id}" not in lecture_ids
-    assert lecture_ids.index(f"lec:{earlier.id}") < lecture_ids.index(
-        f"lec:{later.id}"
+    assert _context(earlier.id) in lecture_ids
+    assert _context(later.id) in lecture_ids
+    assert _context(premium.id) in lecture_ids
+    assert _context(other.id) not in lecture_ids
+    assert _context(unspecified.id) not in lecture_ids
+    assert lecture_ids.index(_context(earlier.id)) < lecture_ids.index(
+        _context(later.id)
     )
-    assert "💎 Premium Lecture" in _button_labels(markup)
+    assert "💎 L6 · Premium Lecture" in _button_labels(markup)
     assert f"teachers:{biochemistry.id}:0" in data
     assert max(_callback_lengths(markup)) <= 64
     cb.answer.assert_awaited_once_with()
@@ -223,8 +226,8 @@ async def test_unspecified_teacher_bucket_lists_only_unassigned_lectures(
     lecture_ids = [value for value in data if value.startswith("lec:")]
 
     assert TEACHER_UNSPECIFIED in text
-    assert f"lec:{unassigned.id}" in lecture_ids
-    assert f"lec:{assigned.id}" not in lecture_ids
+    assert f"lec:{unassigned.id}:tch:{biochemistry.id}:0:0" in lecture_ids
+    assert f"lec:{assigned.id}:tch:{biochemistry.id}:0:0" not in lecture_ids
 
 
 async def test_teacher_list_pagination_clamps_and_uses_short_callbacks(
@@ -276,19 +279,22 @@ async def test_teacher_lecture_pagination_and_back_callback(
     data = _button_data(cb.message.edit_text.await_args.kwargs["reply_markup"])
     lecture_ids = [value for value in data if value.startswith("lec:")]
     assert lecture_ids == [
-        f"lec:{lectures[8].id}",
-        f"lec:{lectures[9].id}",
+        f"lec:{lectures[8].id}:tch:{biochemistry.id}:{teacher.id}:1",
+        f"lec:{lectures[9].id}:tch:{biochemistry.id}:{teacher.id}:1",
     ]
     assert f"tlec:{biochemistry.id}:{teacher.id}:0" in data
     assert f"teachers:{biochemistry.id}:0" in data
 
-    back = _callback(f"back_teacher:{biochemistry.id}:{teacher.id}", user.id)
+    back = _callback(
+        f"back_teacher:{biochemistry.id}:{teacher.id}:1", user.id
+    )
     await back_teacher(back, session, user)
     back_data = _button_data(
         back.message.edit_text.await_args.kwargs["reply_markup"]
     )
     assert [value for value in back_data if value.startswith("lec:")] == [
-        f"lec:{lecture.id}" for lecture in lectures[:8]
+        f"lec:{lecture.id}:tch:{biochemistry.id}:{teacher.id}:1"
+        for lecture in lectures[8:]
     ]
     back.answer.assert_awaited_once_with()
 
@@ -313,7 +319,7 @@ async def test_lecture_back_button_opens_its_teacher_context(
     back_data = _button_data(
         back.message.edit_text.await_args.kwargs["reply_markup"]
     )
-    assert f"lec:{lecture.id}" in back_data
+    assert f"lec:{lecture.id}:tch:{biochemistry.id}:{teacher.id}:0" in back_data
 
 
 async def test_legacy_lecture_page_callback_still_works(session, catalogue):

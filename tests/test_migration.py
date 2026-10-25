@@ -55,6 +55,21 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
                 )
             )
         ).one()
+        has_topics = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("topics")
+        )
+        has_upload_topics = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("upload_item_topics")
+        )
+        has_lecture_topics = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("lecture_topics")
+        )
+        has_teacher_aliases = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("teacher_aliases")
+        )
+        has_admin_users = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("admin_users")
+        )
 
     assert {
         "file_id",
@@ -63,7 +78,15 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
         "teacher_id",
         "teacher_source",
         "teacher_review_reason",
+        "original_caption",
+        "topic_source",
+        "topic_review_reason",
     } <= columns
+    assert has_topics is True
+    assert has_upload_topics is True
+    assert has_lecture_topics is True
+    assert has_teacher_aliases is True
+    assert has_admin_users is True
     assert row.id == 1
     assert row.file_unique_id == "existing-unique-id"
     assert row.status == "classified"

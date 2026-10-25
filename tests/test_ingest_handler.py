@@ -6,6 +6,7 @@ import pytest
 
 from sqlalchemy import func, select
 
+from bot.db.ingestion_repo import approve_batch, skip_item
 from bot.db.models import UploadItem
 from bot.handlers import ingest as ingest_handler
 
@@ -89,6 +90,133 @@ async def test_handler_ignores_other_chats(monkeypatch, session, seeded_course):
     )
 
     await ingest_handler.ingest_message(message, session)
+
+    count = await session.scalar(select(func.count(UploadItem.id)))
+    assert count == 0
+
+
+async def test_edited_caption_reclassifies_existing_upload(
+    monkeypatch, session, seeded_course
+):
+    seeded_course
+    monkeypatch.setattr(
+        ingest_handler,
+        "get_settings",
+        lambda: SimpleNamespace(upload_inbox_chat_id="-1001"),
+    )
+    message = _fake_message(
+        chat_id=-1001,
+        message_id=43,
+        video=SimpleNamespace(
+            file_name=None,
+            file_id="edit-file-id",
+            file_unique_id="edited-video",
+        ),
+        caption="Anatomy A Lecture 43",
+    )
+    await ingest_handler.ingest_message(message, session)
+    item = await session.scalar(select(UploadItem))
+    assert item is not None
+    original_caption = item.raw_caption
+
+    message.caption = "Anatomy A Lecture 44"
+    await ingest_handler.ingest_edited_message(message, session)
+    await session.refresh(item)
+
+    assert item.raw_caption == "Anatomy A Lecture 44"
+    assert item.original_caption == original_caption
+    assert item.lecture_number == 44
+    assert item.status == "classified"
+
+
+async def test_edited_caption_is_ignored_after_approval(
+    monkeypatch, session, seeded_course
+):
+    seeded_course
+    monkeypatch.setattr(
+        ingest_handler,
+        "get_settings",
+        lambda: SimpleNamespace(upload_inbox_chat_id="-1001"),
+    )
+    message = _fake_message(
+        chat_id=-1001,
+        message_id=44,
+        video=SimpleNamespace(
+            file_name=None,
+            file_id="approved-edit-file",
+            file_unique_id="approved-edit-video",
+        ),
+        caption="Anatomy A Lecture 44",
+    )
+    await ingest_handler.ingest_message(message, session)
+    item = await session.scalar(select(UploadItem))
+    ok, reason = await approve_batch(session, item.batch_id, 123)
+    assert ok is True, reason
+
+    message.caption = "Anatomy A Lecture 99"
+    await ingest_handler.ingest_edited_message(message, session)
+    await session.refresh(item)
+
+    assert item.raw_caption == "Anatomy A Lecture 44"
+    assert item.lecture_number == 44
+
+
+async def test_edited_caption_does_not_revive_skipped_upload(
+    monkeypatch, session, seeded_course
+):
+    seeded_course
+    monkeypatch.setattr(
+        ingest_handler,
+        "get_settings",
+        lambda: SimpleNamespace(upload_inbox_chat_id="-1001"),
+    )
+    message = _fake_message(
+        chat_id=-1001,
+        message_id=45,
+        video=SimpleNamespace(
+            file_name=None,
+            file_id="skipped-edit-file",
+            file_unique_id="skipped-edit-video",
+        ),
+        caption="Anatomy A Lecture 45",
+    )
+    await ingest_handler.ingest_message(message, session)
+    item = await session.scalar(select(UploadItem))
+    assert item is not None
+    original_caption = item.raw_caption
+    original_number = item.lecture_number
+    assert await skip_item(session, item.id) is True
+
+    message.caption = "Anatomy A Lecture 99"
+    await ingest_handler.ingest_edited_message(message, session)
+    await session.refresh(item)
+
+    assert item.status == "skipped"
+    assert item.raw_caption == original_caption
+    assert item.lecture_number == original_number
+
+
+async def test_edited_caption_does_not_create_missing_upload(
+    monkeypatch, session, seeded_course
+):
+    seeded_course
+    monkeypatch.setattr(
+        ingest_handler,
+        "get_settings",
+        lambda: SimpleNamespace(upload_inbox_chat_id="-1001"),
+    )
+    message = _fake_message(
+        chat_id=-1001,
+        message_id=77,
+        video=SimpleNamespace(
+            file_name=None,
+            file_id="missing-edit-file",
+            file_unique_id="missing-edit-video",
+        ),
+        caption="Anatomy A Lecture 77",
+    )
+
+    await ingest_handler.ingest_edited_message(message, session)
 
     count = await session.scalar(select(func.count(UploadItem.id)))
     assert count == 0

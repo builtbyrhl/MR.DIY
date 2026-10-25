@@ -840,3 +840,159 @@ async def test_assign_rolls_back_every_item_when_any_item_fails(
     assert [topic.id for topic in await list_item_topics(session, second.id)] == [
         cat.brain.id
     ]
+
+
+def test_pipe_preferred_caption_parsing_supports_current_layout():
+    parsed = parse_caption(
+        "Anatomy | Dr Mohammad Azam Sir | Neuroanatomy | Introduction",
+        None,
+    )
+    assert parsed.structured is True
+    assert parsed.caption_format == "pipe_preferred"
+    assert parsed.subject_name == "Anatomy"
+    assert parsed.teacher_name == "Dr Mohammad Azam Sir"
+    assert parsed.topic_name == "Neuroanatomy"
+    assert parsed.lecture_number is None
+    assert parsed.numbers == []
+    assert parsed.number_required is False
+    assert parsed.lecture_title == "Introduction"
+    assert parsed.title == "Introduction"
+    assert parsed.teacher_missing is False
+
+
+def test_pipe_legacy_caption_parsing_supports_number_variants():
+    for number in ("1", "L1", "Lecture 1"):
+        parsed = parse_caption(
+            f"Anatomy | Skull | {number} | Dr Mohammad Azam Sir",
+            None,
+        )
+        assert parsed.structured is True
+        assert parsed.caption_format == "pipe_legacy"
+        assert parsed.subject_name == "Anatomy"
+        assert parsed.teacher_name == "Dr Mohammad Azam Sir"
+        assert parsed.topic_name == "Skull"
+        assert parsed.lecture_number == 1
+        assert parsed.numbers == [1]
+        assert parsed.number_required is True
+        assert parsed.title == "Skull"
+
+
+async def test_pipe_formats_classify_using_teacher_records_and_aliases(
+    session, topic_catalogue
+):
+    cat = topic_catalogue
+    preferred = await _ingest(
+        session,
+        60,
+        "Anatomy | Dr Mohammad Azam Sir | Skull | Brainstem",
+    )
+    assert preferred.status == "classified"
+    assert preferred.teacher_id == cat.teacher.id
+    assert preferred.title == "Brainstem"
+    assert [topic.id for topic in await list_item_topics(session, preferred.id)] == [
+        cat.skull.id
+    ]
+
+    legacy = await _ingest(
+        session,
+        61,
+        "Anatomy | Skull | L1 | Dr Mohammad Azam Sir",
+    )
+    assert legacy.status == "classified"
+    assert legacy.teacher_id == cat.teacher.id
+    assert legacy.lecture_number == 1
+    assert legacy.title == "Skull"
+
+    _, error = await add_teacher_alias(session, cat.teacher.id, "Azam")
+    assert error is None
+    aliased = await _ingest(
+        session,
+        62,
+        "Anatomy | Azam | Skull | Pons",
+    )
+    assert aliased.status == "classified"
+    assert aliased.teacher_id == cat.teacher.id
+    assert aliased.title == "Pons"
+
+
+async def test_pipe_unknown_teachers_are_never_assigned(
+    session, topic_catalogue
+):
+    preferred = await _ingest(
+        session,
+        63,
+        "Anatomy | Dr Unknown | Skull | Brainstem",
+    )
+    assert preferred.status == "needs_review"
+    assert preferred.teacher_id is None
+    assert "teacher not found: Dr Unknown" in preferred.review_reason
+
+    legacy = await _ingest(
+        session,
+        64,
+        "Anatomy | Skull | Lecture 1 | Dr Unknown",
+    )
+    assert legacy.status == "needs_review"
+    assert legacy.teacher_id is None
+    assert legacy.lecture_number == 1
+    assert "teacher not found: Dr Unknown" in legacy.review_reason
+
+    ambiguous_teacher = await _ingest(
+        session,
+        65,
+        "Anatomy | Unknown Person | Skull | Brainstem",
+    )
+    assert ambiguous_teacher.status == "needs_review"
+    assert ambiguous_teacher.teacher_id is None
+    assert "ambiguous pipe caption format" in ambiguous_teacher.review_reason
+
+
+async def test_pipe_caption_with_two_teacher_fields_needs_review(
+    session, topic_catalogue
+):
+    cat = topic_catalogue
+    other_teacher, error = await add_teacher(
+        session, cat.anatomy.id, "Dr Second Teacher"
+    )
+    assert error is None
+
+    item = await _ingest(
+        session,
+        66,
+        "Anatomy | Dr Mohammad Azam Sir | Lecture 1 | Dr Second Teacher",
+    )
+    assert item.status == "needs_review"
+    assert item.teacher_id is None
+    assert "ambiguous pipe caption format" in item.review_reason
+    assert other_teacher.id != cat.teacher.id
+
+
+def test_pipe_caption_backward_compatibility():
+    titled = parse_caption(
+        "Anatomy | Skull | Lecture 3: Cranial Nerves | Dr Mohammad Azam Sir",
+        None,
+    )
+    assert titled.structured is True
+    assert titled.caption_format == "pipe_legacy"
+    assert titled.lecture_number == 3
+    assert titled.lecture_title == "Cranial Nerves"
+    assert titled.title == "Cranial Nerves"
+
+    missing_teacher = parse_caption("Anatomy | Skull | Lecture 1", None)
+    assert missing_teacher.structured is True
+    assert missing_teacher.teacher_name is None
+    assert missing_teacher.teacher_missing is True
+
+    two_field = parse_caption(
+        "Lecture 10: Pathophysiology | Dr Sharma",
+        None,
+    )
+    assert two_field.structured is False
+    assert two_field.lecture_number == 10
+    assert two_field.teacher_name == "Dr Sharma"
+
+    non_numeric_third_field = parse_caption(
+        "Anatomy | Skull | Dr Azam",
+        None,
+    )
+    assert non_numeric_third_field.structured is False

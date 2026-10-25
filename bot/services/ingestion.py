@@ -56,8 +56,8 @@ CAPTION_EDIT_BLOCKED_STATUSES = frozenset({"skipped", "publishing", "published"}
 
 
 @dataclass(frozen=True)
-class SlashCaptionCandidate:
-    """One possible interpretation of a four-field slash caption."""
+class CaptionCandidate:
+    """One possible interpretation of a structured caption."""
 
     format: str
     subject_name: str
@@ -87,7 +87,8 @@ class ParsedCaption:
     format_error: Optional[str] = None
     ambiguous: bool = False
     number_required: bool = True
-    slash_candidates: tuple[SlashCaptionCandidate, ...] = ()
+    slash_candidates: tuple[CaptionCandidate, ...] = ()
+    pipe_candidates: tuple[CaptionCandidate, ...] = ()
 
 
 SLASH_FIELD_COUNT = 4
@@ -141,56 +142,6 @@ def _split_teacher(title: str) -> tuple[Optional[str], Optional[str], bool]:
     if len(candidate) < 2:
         return None, None, False
     return base, candidate, explicit
-
-
-def _structured_number(text: str) -> list[int]:
-    cleaned = text.strip()
-    if not cleaned:
-        return []
-    if re.fullmatch(r"\d{1,3}", cleaned):
-        number = int(cleaned)
-        return [number] if 1 <= number <= 999 else []
-    short = re.fullmatch(r"[Ll]\s*(\d{1,3})", cleaned)
-    if short:
-        number = int(short.group(1))
-        return [number] if 1 <= number <= 999 else []
-    return _extract_numbers(cleaned)
-
-
-def _parse_structured_line(
-    line: str,
-) -> Optional[tuple[str, str, list[int], Optional[str], Optional[str], bool]]:
-    """Parse ``Subject | Topic | Lecture Number | Teacher``.
-
-    Returns ``(subject, topic, numbers, teacher, title, teacher_missing)`` or
-    ``None`` when the line does not have a valid structured lecture-number
-    field. Requiring a number in the third field prevents legacy captions such
-    as ``Lecture 10: Pathophysiology | Dr Sharma`` from being reinterpreted.
-    """
-    parts = [part.strip() for part in line.split("|")]
-    if len(parts) < 3:
-        return None
-
-    numbers = _structured_number(parts[2])
-    if not numbers:
-        return None
-
-    subject = " ".join(parts[0].split()) or None
-    topic = " ".join(parts[1].split()) or None
-    teacher_raw = " | ".join(parts[3:]).strip(" \t-—–:|,;")
-    teacher_name = None
-    teacher_missing = True
-    if teacher_raw:
-        candidate = teacher_raw
-        label = TEACHER_LABEL_PREFIX.match(candidate)
-        if label:
-            candidate = candidate[label.end() :].strip(" \t-—–:|,;")
-        if len(candidate) >= 2:
-            teacher_name = candidate
-            teacher_missing = False
-
-    title = topic or subject or "Untitled"
-    return subject, topic, numbers, teacher_name, title, teacher_missing
 
 
 def _clean_field(value: str) -> str:
@@ -280,7 +231,7 @@ def _preferred_video_title_error(
     return None
 
 
-def _slash_candidate(
+def _caption_candidate(
     *,
     format: str,
     subject: str,
@@ -289,9 +240,9 @@ def _slash_candidate(
     numbers: list[int],
     lecture_title: Optional[str],
     number_required: bool = True,
-) -> SlashCaptionCandidate:
+) -> CaptionCandidate:
     teacher, teacher_missing = _teacher_field(teacher_raw)
-    return SlashCaptionCandidate(
+    return CaptionCandidate(
         format=format,
         subject_name=_clean_field(subject),
         teacher_name=teacher,
@@ -303,8 +254,8 @@ def _slash_candidate(
     )
 
 
-def _parsed_from_slash_candidate(
-    candidate: SlashCaptionCandidate,
+def _parsed_from_caption_candidate(
+    candidate: CaptionCandidate,
     *,
     raw_line: str,
     format_error: Optional[str] = None,
@@ -343,8 +294,8 @@ def _parsed_from_slash_candidate(
 
 def _ambiguous_slash_caption(
     line: str,
-    preferred: SlashCaptionCandidate,
-    legacy: SlashCaptionCandidate,
+    preferred: CaptionCandidate,
+    legacy: CaptionCandidate,
     numbers: list[int],
 ) -> ParsedCaption:
     return ParsedCaption(
@@ -371,7 +322,7 @@ def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
     video_title = _clean_field(parts[3])
     legacy_numbers, legacy_title = _number_and_title(parts[2])
     preferred_number_like, _ = _number_and_title(parts[3])
-    preferred = _slash_candidate(
+    preferred = _caption_candidate(
         format="slash_preferred",
         subject=parts[0],
         teacher_raw=parts[1],
@@ -380,7 +331,7 @@ def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
         lecture_title=video_title or None,
         number_required=False,
     )
-    legacy = _slash_candidate(
+    legacy = _caption_candidate(
         format="slash_legacy",
         subject=parts[0],
         teacher_raw=parts[3],
@@ -406,17 +357,17 @@ def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
         )
     if fourth_teacher:
         if legacy_numbers:
-            return _parsed_from_slash_candidate(legacy, raw_line=line)
+            return _parsed_from_caption_candidate(legacy, raw_line=line)
         error = (
             f"invalid lecture number: {parts[2]}"
             if third_lecture
             else "lecture number missing"
         )
-        return _parsed_from_slash_candidate(
+        return _parsed_from_caption_candidate(
             legacy, raw_line=line, format_error=error
         )
     if second_teacher:
-        return _parsed_from_slash_candidate(
+        return _parsed_from_caption_candidate(
             preferred,
             raw_line=line,
             format_error=_preferred_video_title_error(
@@ -432,20 +383,130 @@ def _parse_slash_line(line: str) -> Optional[ParsedCaption]:
             sorted(set(legacy_numbers + preferred_number_like)),
         )
     if legacy_numbers:
-        return _parsed_from_slash_candidate(legacy, raw_line=line)
+        return _parsed_from_caption_candidate(legacy, raw_line=line)
     if third_lecture:
-        return _parsed_from_slash_candidate(
+        return _parsed_from_caption_candidate(
             legacy,
             raw_line=line,
             format_error=f"invalid lecture number: {parts[2]}",
         )
 
-    return _parsed_from_slash_candidate(
+    return _parsed_from_caption_candidate(
         preferred,
         raw_line=line,
         format_error=_preferred_video_title_error(
             video_title, parts[0], parts[2]
         ),
+    )
+
+
+def _ambiguous_pipe_caption(
+    line: str,
+    preferred: CaptionCandidate,
+    legacy: CaptionCandidate,
+    numbers: list[int],
+) -> ParsedCaption:
+    return ParsedCaption(
+        title=line[:256],
+        lecture_number=None,
+        number_ambiguous=bool(numbers),
+        numbers=numbers,
+        structured=True,
+        ambiguous=True,
+        caption_format="pipe_ambiguous",
+        format_error=(
+            "ambiguous pipe caption format: fields could match both the "
+            "preferred and legacy layouts"
+        ),
+        pipe_candidates=(preferred, legacy),
+    )
+
+
+def _parse_pipe_line(line: str) -> Optional[ParsedCaption]:
+    parts = [part.strip() for part in line.split("|")]
+    if len(parts) < 3:
+        return None
+
+    subject = parts[0]
+    second = parts[1]
+    third = parts[2]
+    tail = " | ".join(parts[3:]).strip()
+    legacy_numbers, legacy_title = _number_and_title(third)
+    preferred_number_like, _ = _number_and_title(tail)
+
+    preferred = _caption_candidate(
+        format="pipe_preferred",
+        subject=subject,
+        teacher_raw=second,
+        topic=third,
+        numbers=[],
+        lecture_title=tail or None,
+        number_required=False,
+    )
+    legacy = _caption_candidate(
+        format="pipe_legacy",
+        subject=subject,
+        teacher_raw=tail,
+        topic=second,
+        numbers=legacy_numbers,
+        lecture_title=legacy_title,
+        number_required=True,
+    )
+
+    if len(parts) == 3:
+        if legacy_numbers:
+            return _parsed_from_caption_candidate(legacy, raw_line=line)
+        return None
+
+    second_teacher = _looks_like_teacher_field(second)
+    fourth_teacher = _looks_like_teacher_field(parts[3])
+    third_lecture = bool(legacy_numbers) or _looks_like_lecture_field(third)
+
+    if second_teacher and fourth_teacher:
+        return _ambiguous_pipe_caption(
+            line,
+            preferred,
+            legacy,
+            sorted(set(legacy_numbers + preferred_number_like)),
+        )
+    if legacy_numbers:
+        if second_teacher:
+            return _ambiguous_pipe_caption(
+                line,
+                preferred,
+                legacy,
+                sorted(set(legacy_numbers + preferred_number_like)),
+            )
+        return _parsed_from_caption_candidate(legacy, raw_line=line)
+    if fourth_teacher:
+        error = (
+            f"invalid lecture number: {third}"
+            if third_lecture
+            else "lecture number missing"
+        )
+        return _parsed_from_caption_candidate(
+            legacy, raw_line=line, format_error=error
+        )
+    if second_teacher:
+        return _parsed_from_caption_candidate(
+            preferred,
+            raw_line=line,
+            format_error=_preferred_video_title_error(
+                preferred.lecture_title, subject, third
+            ),
+        )
+    if third_lecture:
+        return _parsed_from_caption_candidate(
+            legacy,
+            raw_line=line,
+            format_error=f"invalid lecture number: {third}",
+        )
+
+    return _ambiguous_pipe_caption(
+        line,
+        preferred,
+        legacy,
+        sorted(set(legacy_numbers + preferred_number_like)),
     )
 
 
@@ -460,22 +521,9 @@ def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCap
             break
 
     if "|" in first_line:
-        structured = _parse_structured_line(first_line)
-        if structured is not None:
-            subject, topic, numbers, teacher, title, teacher_missing = structured
-            return ParsedCaption(
-                title=title[:256],
-                lecture_number=numbers[0] if len(numbers) == 1 else None,
-                number_ambiguous=len(numbers) > 1,
-                numbers=numbers,
-                teacher_name=teacher,
-                teacher_explicit=teacher is not None,
-                subject_name=subject,
-                topic_name=topic,
-                structured=True,
-                teacher_missing=teacher_missing,
-                caption_format="pipe",
-            )
+        pipe = _parse_pipe_line(first_line)
+        if pipe is not None:
+            return pipe
     if "/" in first_line:
         slash = _parse_slash_line(first_line)
         if slash is not None:
@@ -579,10 +627,10 @@ def match_courses(courses: list[Course], text: str) -> list[Course]:
 async def _select_slash_candidate(
     session: AsyncSession,
     courses: list[Course],
-    candidates: tuple[SlashCaptionCandidate, ...],
-) -> Optional[SlashCaptionCandidate]:
+    candidates: tuple[CaptionCandidate, ...],
+) -> Optional[CaptionCandidate]:
     """Use existing records to resolve a numerically ambiguous slash caption."""
-    fully_resolved: list[SlashCaptionCandidate] = []
+    fully_resolved: list[CaptionCandidate] = []
     for candidate in candidates:
         if (
             candidate.teacher_missing
@@ -617,16 +665,83 @@ async def _select_slash_candidate(
     return None
 
 
+async def _select_pipe_candidate(
+    session: AsyncSession,
+    courses: list[Course],
+    candidates: tuple[CaptionCandidate, ...],
+) -> Optional[CaptionCandidate]:
+    """Use existing teacher names and aliases to resolve a pipe layout."""
+    evidence: list[tuple[CaptionCandidate, int]] = []
+    for candidate in candidates:
+        if (
+            candidate.teacher_missing
+            or candidate.teacher_name is None
+            or (
+                candidate.number_required
+                and len(candidate.numbers) != 1
+            )
+        ):
+            evidence.append((candidate, 0))
+            continue
+        course_matches = match_courses(courses, candidate.subject_name)
+        if len(course_matches) != 1:
+            evidence.append((candidate, 0))
+            continue
+        teachers = await find_matching_teachers(
+            session, course_matches[0].subject_id, candidate.teacher_name
+        )
+        evidence.append((candidate, len(teachers)))
+
+    matched = [candidate for candidate, count in evidence if count == 1]
+    if len(matched) == 1 and sum(count for _, count in evidence) == 1:
+        return matched[0]
+    return None
+
+
 async def classify_item(session: AsyncSession, item: UploadItem) -> UploadItem:
     parsed = parse_caption(item.raw_caption, item.file_name)
     courses = await list_courses(session)
+
+    if parsed.pipe_candidates:
+        selected = await _select_pipe_candidate(
+            session, courses, parsed.pipe_candidates
+        )
+        if selected is not None:
+            format_error = None
+            if selected.format == "pipe_preferred":
+                format_error = _preferred_video_title_error(
+                    selected.lecture_title,
+                    selected.subject_name,
+                    selected.topic_name or "",
+                )
+            parsed = _parsed_from_caption_candidate(
+                selected,
+                raw_line=(item.raw_caption or "").strip(),
+                format_error=format_error,
+            )
+        else:
+            parsed = ParsedCaption(
+                title=parsed.title,
+                lecture_number=None,
+                number_ambiguous=parsed.number_ambiguous,
+                numbers=parsed.numbers,
+                structured=True,
+                ambiguous=True,
+                caption_format="pipe_ambiguous",
+                format_error=(
+                    parsed.format_error
+                    or "ambiguous pipe caption format: existing records "
+                    "do not uniquely resolve the fields"
+                ),
+                pipe_candidates=parsed.pipe_candidates,
+            )
 
     if parsed.slash_candidates:
         selected = await _select_slash_candidate(
             session, courses, parsed.slash_candidates
         )
         if selected is not None:
-            parsed = _parsed_from_slash_candidate(
+            parsed = _parsed_from_caption_candidate(
                 selected,
                 raw_line=(item.raw_caption or "").strip(),
             )

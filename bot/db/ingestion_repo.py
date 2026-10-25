@@ -132,6 +132,36 @@ async def find_duplicate_file(
     return res.scalar_one_or_none()
 
 
+async def find_lecture_number_conflict(
+    session: AsyncSession,
+    *,
+    item_id: int,
+    course_id: int,
+    lecture_number: int,
+    topic_ids: list[int],
+) -> Optional[UploadItem]:
+    """Find another active item with the same number in a shared topic."""
+    if not topic_ids:
+        return None
+
+    res = await session.execute(
+        select(UploadItem)
+        .where(
+            UploadItem.id != item_id,
+            UploadItem.course_id == course_id,
+            UploadItem.lecture_number == lecture_number,
+            UploadItem.status != "skipped",
+        )
+        .order_by(UploadItem.id)
+    )
+    topic_set = set(topic_ids)
+    for candidate in res.scalars().all():
+        candidate_topics = await list_item_topics(session, candidate.id)
+        if any(topic.id in topic_set for topic in candidate_topics):
+            return candidate
+    return None
+
+
 async def ensure_item_mutable(session: AsyncSession, item: UploadItem) -> None:
     batch = await session.get(UploadBatch, item.batch_id)
     if batch is not None and batch.status == "approved":

@@ -72,14 +72,24 @@ Anatomy | Skull | Lecture 1 | Dr Mohammad Azam Sir
 
 The first line must contain at least three pipe-separated fields, and the third field must contain a lecture number. Such captions are parsed as structured metadata: subject, topic, number, and teacher. A missing fourth field flags `teacher missing`. The old caption style is unchanged.
 
-Slash-separated captions are also supported. The preferred layout is:
+Slash-separated captions are also supported. The preferred numbered layout is:
+
+```text
+Subject / Teacher / Subtopic or System / Video Title / L<number>
+Anatomy / Dr Mohammad Azam Sir / Thorax / Thoracic wall / L1
+Anatomy / Dr Mohammad Azam Sir / Thorax / Intercostal Artery / L2
+```
+
+The final field must be a standalone `L<number>` between 1 and 999; matching is case-insensitive. The video-title field is stored as the student-visible lecture title, and the lecture number is stored as an integer for numeric ordering. Do not put the number in the title. A missing, malformed, or out-of-range final number sends the item to `needs_review`. An `L<number>` inside the title is not used as the lecture number.
+
+The four-field layout remains supported for captions without a number:
 
 ```text
 Subject / Teacher / Subtopic or System / Video Title
 Anatomy / Dr Mohammad Azam Sir / Neuroanatomy / Brainstem
 ```
 
-The video-title field is stored as the student-visible lecture title. No lecture number is required in this layout. Empty, pure lecture-number, or subject/topic-repeat titles are treated as generic and sent to `needs_review`.
+Empty, pure lecture-number, or subject/topic-repeat titles are treated as generic and sent to `needs_review`.
 
 The legacy slash layout remains valid:
 
@@ -88,13 +98,13 @@ Subject / Subtopic or System / Lecture Number / Teacher
 Anatomy / Head and Neck / Lecture 12 / Dr Mohammad Azam Sir
 ```
 
-Both slash layouts require exactly four fields. Existing course, teacher, and topic records resolve fields and aliases; if an ambiguous layout does not produce exactly one valid interpretation, the item goes to `needs_review`. A legacy lecture field may include a title suffix, for example `Lecture 3: Cranial Nerves`.
+The four-field slash layouts require exactly four fields; the numbered layout requires exactly five. Existing course, teacher, and topic records resolve fields and aliases; if an ambiguous four-field layout does not produce exactly one valid interpretation, the item goes to `needs_review`. A legacy lecture field may include a title suffix, for example `Lecture 3: Cranial Nerves`.
 
 Topics are subject-scoped and must already exist. Match names exactly after case, spacing, and punctuation normalization; captions never create topics. Unknown, missing, or ambiguous topics send the item to `needs_review` with a reason such as `topic not found: Neuroanatomy`. Add topics with `/addtopic anatomy|Skull` before ingesting. Pipe and legacy slash captions use the canonical topic or original lecture title; the preferred slash layout uses its final field as the visible video title.
 
-Lectures may belong to multiple topics. Lecture numbers are validated per topic/teacher sequence, so `Lecture 1` can exist in both `Skull` and `Upper Limb` without a global duplicate-number conflict. Topic assignment can be corrected after batch approval; clearing a topic is also treated as a manual decision and survives `/retry`.
+Lectures may belong to multiple topics. Lecture numbers are unique within a course and shared topic, so `L1` can exist in both `Skull` and `Upper Limb`, but a second `L1` in `Skull` is sent to `needs_review` as a duplicate. Topic assignment can be corrected after batch approval; clearing a topic is also treated as a manual decision and survives `/retry`.
 
-Existing uploads and legacy captions are never assigned topics automatically. Re-ingesting old Telegram messages creates new uploads, so use `/refreshcaptions <batch_id>` to preview captions recovered from the stored source messages, then `/refreshcaptions <batch_id> apply` to update only non-preferred captions and reclassify already-valid ones. Alternatively use `/setcaption` on unapproved, non-skipped items (use `/keep` first to restore a skipped item) or `/settopic` and `/setlecturetopic` on existing catalogue entries to classify them deliberately. The recovery command forwards temporary copies only to the requesting admin's private chat and deletes them; it preserves valid preferred captions, never publishes, and never creates new uploads. Telegram caption edits update the database only while the item remains unapproved; edits to approved, publishing, or published items are deliberately ignored. To correct the student-visible title of an already published video without re-uploading it, use `/setlecturetitle <lecture_id>|<title>`. This mirrors the title to the linked upload while leaving the original caption, file ID, publication state, and audit history unchanged. Legacy lectures remain available through teacher browsing.
+Existing uploads and legacy captions are never assigned topics automatically. Re-ingesting old Telegram messages creates new uploads, so use `/refreshcaptions <batch_id>` to preview captions recovered from the stored source messages, then `/refreshcaptions <batch_id> apply` to update invalid or non-preferred captions, fill missing lecture numbers from numbered captions, and reclassify already-valid ones. The preview shows current, source, and proposed lecture numbers. Alternatively use `/setcaption` on unapproved, non-skipped items (use `/keep` first to restore a skipped item) or `/settopic` and `/setlecturetopic` on existing catalogue entries to classify them deliberately. The recovery command forwards temporary copies only to the requesting admin's private chat and deletes them; it preserves valid preferred captions, never publishes, and never creates new uploads. Telegram caption edits update the database only while the item remains unapproved; edits to approved, publishing, or published items are deliberately ignored. To correct the student-visible title of an already published video without re-uploading it, use `/setlecturetitle <lecture_id>|<title>`. This mirrors the title to the linked upload while leaving the original caption, file ID, publication state, and audit history unchanged. Legacy lectures remain available through teacher browsing.
 
 ## Automatic teacher extraction
 For legacy captions, put the teacher at the end of the first caption line. In the explicit `Subject | Topic | Lecture Number | Teacher` format, only the fourth field is used as the teacher. A legacy teacher caption looks like:

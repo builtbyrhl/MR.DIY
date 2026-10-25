@@ -51,6 +51,7 @@ from bot.services.auth import require_admin
 from bot.services.ingestion import (
     CAPTION_EDIT_BLOCKED_STATUSES,
     keep_item,
+    parse_caption,
     pause_ingestion,
     preferred_caption_error,
     reclassify_item_caption,
@@ -114,6 +115,9 @@ class _CaptionRefreshPlan:
     reason: str
     source_caption: Optional[str] = None
     source_error: Optional[str] = None
+    current_number: Optional[int] = None
+    source_number: Optional[int] = None
+    proposed_number: Optional[int] = None
 
 
 def _caption_refresh_plan(
@@ -121,6 +125,17 @@ def _caption_refresh_plan(
     source_caption: Optional[str],
     source_error: Optional[str],
 ) -> _CaptionRefreshPlan:
+    current_parsed = parse_caption(item.raw_caption, item.file_name)
+    source_parsed = (
+        parse_caption(source_caption, item.file_name)
+        if source_caption is not None
+        else None
+    )
+    current_number = current_parsed.lecture_number
+    source_number = (
+        source_parsed.lecture_number if source_parsed is not None else None
+    )
+
     if item.status == "skipped":
         return _CaptionRefreshPlan(
             item,
@@ -128,6 +143,8 @@ def _caption_refresh_plan(
             "item is skipped",
             source_caption,
             source_error,
+            current_number=current_number,
+            source_number=source_number,
         )
     if (
         item.status in CAPTION_EDIT_BLOCKED_STATUSES
@@ -139,6 +156,8 @@ def _caption_refresh_plan(
             "item is publishing, published, or otherwise locked",
             source_caption,
             source_error,
+            current_number=current_number,
+            source_number=source_number,
         )
 
     current_error = preferred_caption_error(item.raw_caption, item.file_name)
@@ -148,13 +167,38 @@ def _caption_refresh_plan(
     )
 
     if current_error is None:
-        if item.status == "classified":
+        if (
+            current_number is None
+            and source_valid
+            and source_number is not None
+        ):
+            return _CaptionRefreshPlan(
+                item,
+                "update",
+                "populate lecture number from recovered source",
+                source_caption,
+                source_error,
+                current_number=current_number,
+                source_number=source_number,
+                proposed_number=source_number,
+            )
+        if item.status == "classified" and (
+            current_number is None
+            or current_number == item.lecture_number
+        ):
             return _CaptionRefreshPlan(
                 item,
                 "preserve",
                 "current preferred caption is already valid",
                 source_caption,
                 source_error,
+                current_number=current_number,
+                source_number=source_number,
+                proposed_number=(
+                    current_number
+                    if current_number is not None
+                    else item.lecture_number
+                ),
             )
         return _CaptionRefreshPlan(
             item,
@@ -162,6 +206,13 @@ def _caption_refresh_plan(
             "keep current preferred caption and reclassify",
             source_caption,
             source_error,
+            current_number=current_number,
+            source_number=source_number,
+            proposed_number=(
+                current_number
+                if current_number is not None
+                else item.lecture_number
+            ),
         )
 
     if source_valid:
@@ -171,6 +222,9 @@ def _caption_refresh_plan(
             "replace non-preferred caption with recovered source",
             source_caption,
             source_error,
+            current_number=current_number,
+            source_number=source_number,
+            proposed_number=source_number,
         )
 
     if source_caption is None:
@@ -178,7 +232,13 @@ def _caption_refresh_plan(
         if source_error:
             reason += f": {source_error}"
         return _CaptionRefreshPlan(
-            item, "skip", reason, source_caption, source_error
+            item,
+            "skip",
+            reason,
+            source_caption,
+            source_error,
+            current_number=current_number,
+            source_number=source_number,
         )
     return _CaptionRefreshPlan(
         item,
@@ -186,6 +246,8 @@ def _caption_refresh_plan(
         "recovered source does not use the preferred layout",
         source_caption,
         source_error,
+        current_number=current_number,
+        source_number=source_number,
     )
 
 
@@ -253,6 +315,10 @@ async def _fetch_source_caption(
     return caption, None
 
 
+def _number_label(number: Optional[int]) -> str:
+    return f"L{number}" if number is not None else "L?"
+
+
 def _refresh_plan_lines(plan: _CaptionRefreshPlan) -> list[str]:
     lines = [
         f"#{plan.item.id} [{plan.item.status}] action: {plan.action} - {plan.reason}",
@@ -264,6 +330,12 @@ def _refresh_plan_lines(plan: _CaptionRefreshPlan) -> list[str]:
         lines.append(
             f"  source: unavailable - {plan.source_error or 'not available'}"
         )
+    lines.append(
+        "  numbers: "
+        f"current={_number_label(plan.current_number)}, "
+        f"source={_number_label(plan.source_number)}, "
+        f"proposed={_number_label(plan.proposed_number)}"
+    )
     return lines
 
 
@@ -507,9 +579,10 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
     ):
         await message.answer(
             "Usage: /refreshcaptions <batch_id> [apply]\n"
-            "Preview without apply. Apply updates only non-preferred captions "
-            "and reclassifies already-valid ones. It never publishes or "
-            "creates uploads.",
+            "Preview without apply. Apply updates invalid or non-preferred "
+            "captions, fills lecture numbers from numbered captions, and "
+            "reclassifies already-valid ones. It never publishes or creates "
+            "uploads.",
             parse_mode=None,
         )
         return
@@ -545,8 +618,9 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
         lines = [
             f"Caption refresh preview - batch #{batch.id} ({len(items)} items). "
             "No database changes made.",
-            "Add 'apply' to update non-preferred captions and reclassify "
-            "valid ones. No messages will be published.",
+            "Add 'apply' to update non-preferred captions, fill lecture "
+            "numbers from numbered captions, and reclassify valid ones. "
+            "No messages will be published.",
         ]
         for plan in plans:
             lines.extend(_refresh_plan_lines(plan))
@@ -603,13 +677,15 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
             updated += 1
             lines.append(
                 f"#{item.id}: caption updated and reclassified -> "
-                f"[{refreshed.status}] {refreshed.title or 'Untitled'}"
+                f"[{refreshed.status}] {_number_label(refreshed.lecture_number)} "
+                f"{refreshed.title or 'Untitled'}"
             )
         elif outcome == "reclassified":
             reclassified += 1
             lines.append(
                 f"#{item.id}: current caption reclassified -> "
-                f"[{refreshed.status}] {refreshed.title or 'Untitled'}"
+                f"[{refreshed.status}] {_number_label(refreshed.lecture_number)} "
+                f"{refreshed.title or 'Untitled'}"
                 f"{_source_unavailable_note(plan)}"
             )
         elif outcome == "unchanged":

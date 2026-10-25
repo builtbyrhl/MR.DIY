@@ -88,6 +88,8 @@ def _has_caption_number(value: str) -> bool:
 
 def _slash_caption_title(line: str) -> str:
     parts = [" ".join(part.split()) for part in line.split("/")]
+    if len(parts) == 5 and _NUMBER_FIELD.fullmatch(parts[4]):
+        return parts[3]
     if len(parts) != 4:
         return ""
     second_teacher = bool(_TEACHER_FIELD.match(parts[1]))
@@ -112,6 +114,8 @@ def _new_slash_video_title(raw_caption: str | None) -> str:
     if "/" not in line or "|" in line:
         return ""
     parts = [" ".join(part.split()) for part in line.split("/")]
+    if len(parts) == 5 and _NUMBER_FIELD.fullmatch(parts[4]):
+        return parts[3]
     if len(parts) != 4:
         return ""
     second_teacher = bool(_TEACHER_FIELD.match(parts[1]))

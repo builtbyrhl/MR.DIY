@@ -8,20 +8,28 @@ from bot.db.session import get_session_factory
 from bot.db.repo import get_or_create_user
 from bot.keyboards.inline import request_access_kb
 from bot.services.access import (
+    APPROVED,
     PENDING,
     REJECTED,
+    access_is_expired,
     access_status,
     has_library_access,
 )
 from bot.services.auth import load_db_admin_cache
 from bot.utils.telegram import chat_matches
 
-_ACCESS_EXEMPT_COMMANDS = {"start", "help"}
+_ACCESS_EXEMPT_COMMANDS = {"start", "help", "myaccess"}
 _ACCESS_REQUIRED_TEXT = "Library access required. Use /start to request access."
 
 
 def _access_denial(user) -> tuple[str, bool]:
     status = access_status(user)
+    if status == APPROVED and access_is_expired(user):
+        return (
+            "⏳ Your library access has expired. "
+            "Use /start or My Access to request a renewal.",
+            False,
+        )
     if status == PENDING and getattr(user, "access_requested_at", None):
         return (
             "⏳ Your access request is awaiting admin review. "
@@ -64,7 +72,7 @@ def _is_access_exempt(event: TelegramObject) -> bool:
         return True
 
     text = getattr(event, "text", None)
-    if text == "❓ Help":
+    if text in {"❓ Help", "🔑 My Access"}:
         return True
     return _command_name(text) in _ACCESS_EXEMPT_COMMANDS
 

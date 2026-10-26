@@ -8,11 +8,18 @@ Python (aiogram 3) + PostgreSQL.
 3. Run: `python -m bot.main` (polling) or set `WEBHOOK_URL` for webhook mode.
 4. Docker: `docker-compose up`
 
+Optional access and retention settings:
+- `ACCESS_DEFAULT_DAYS` — default approval duration. `0` keeps lifetime access; `1`/`2` gives 24/48-hour access. Explicit `/approveuser <id> <days>` overrides it.
+- `MEDIA_RETENTION_HOURS` — hours before delivered student media is deleted (1–48, default 24). Values of 48 are scheduled with a small safety buffer inside Telegram's limit.
+- `MEDIA_CLEANUP_INTERVAL_SECONDS` — how often the cleanup worker checks for due messages (default 300).
+
 ## Admin
 - `/admin` for commands.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
 - `/reorder <subject_slug>` to sort by channel sequence.
 - `/grant <user_id> [days]` only works for users who have already started the bot.
+- Student access: `/access` lists pending requests and approvals expiring within 7 days. `/approveuser <user_id> [days]` grants access for the optional duration (or `ACCESS_DEFAULT_DAYS`; pass `0` for lifetime); `/rejectuser <user_id>` and `/revokeuser <user_id>` remove it.
+- Students can check `/myaccess` (or **🔑 My Access**) for their status, expiry, and media-retention window.
 - Teachers: `/addteacher <subject_slug>|<name>|[alias1,alias2]`, `/teachers <subject_slug>`, `/setteacher <item_id>|<teacher_id|none>`, `/setteacherbulk <item_ids>|<teacher_id>`, and `/setlectureteacher <lecture_id>|<teacher_id|none>`.
 - Teacher aliases: `/teacheralias <teacher_id>|<alias>`, `/removealias <teacher_id>|<alias>`, and `/renameteacher <teacher_id>|<new name>`. Aliases are explicit and subject-scoped; spelling is never guessed.
 - Topics: `/addtopic <subject_slug>|<name>`, `/topics <subject_slug>`, `/settopic <item_ids>|<topic_ids|none>`, and `/setlecturetopic <lecture_id>|<topic_ids|none>`.
@@ -143,6 +150,9 @@ Matching behavior:
 4. Either retry classification with `/retry <item_id>` for each item after adding the alias, or assign explicitly with `/setteacherbulk <item_ids>|<teacher_id>` or `/assign <item_ids>|-|-|<teacher_id>`.
 5. Run `/dryrun <batch_id>`, then `/approve <batch_id>` and `/publish <batch_id>` once the destination and metadata are verified. Existing items are not reclassified automatically after an alias change.
 
+## Student home
+The reply menu keeps five primary actions: **📚 My Courses**, **🔍 Search**, **▶️ Continue**, **🔑 My Access**, and **❓ Help**. Continue reopens the last watched lecture; My Access shows access status, expiry, and the media-retention window. Bookmarks, progress, premium, and subjects remain available as commands and through their existing handlers.
+
 ## Teacher-based student navigation
 Students choose `Subject → Teacher → System/Topic → Lecture`, or use **All teacher lectures** for a flat list. Teacher and topic lists are built dynamically from the published catalogue, with lecture counts per teacher. Teachers are subject-specific: the same person teaching two subjects has one teacher record per subject. Canonical names and explicit aliases are normalized (spacing, punctuation, and case) within each subject to prevent duplicates.
 
@@ -157,13 +167,15 @@ Students can choose `Subject → Topic → Lecture` in addition to `Subject → 
 ## Content protection
 Student media is sent with Telegram's `protect_content=True`, and the same flag is used when publishing to course topics and copying legacy channel lectures. This disables native forwarding/saving inside Telegram only. It is **not DRM**: users can still screen-record or redistribute files, and Telegram can remove the flag on some content. Do not describe it as copy-proof.
 
+The bot also records each private student delivery in `student_media_messages` and a restart-safe background worker deletes it after `MEDIA_RETENTION_HOURS` (default 24, maximum 48). The worker only targets those recorded private deliveries; it never deletes upload records, source channel posts, or published course-topic messages. Deletion is best-effort: Telegram only allows bots to delete messages for about 48 hours, and a message may already be gone or protected from deletion. Records are marked `deleted`, `failed`, or `missed` accordingly, so a missed deletion is never reported as successful. Only deliveries made after this feature is deployed are tracked; existing private copies are not swept automatically.
+
 ## Backup and restore
 Take a backup before deploying schema changes.
 - PostgreSQL: strip SQLAlchemy's `+asyncpg` suffix before passing the URL to libpq tools: `pg_dump --dbname="${DATABASE_URL/+asyncpg/}" --format=custom --file=mrdiy-backup.dump`.
 - Restore only into an empty/new database: `pg_restore --dbname="${DATABASE_URL/+asyncpg/}" --clean --if-exists mrdiy-backup.dump`.
 - SQLite (local/dev): stop the bot, copy the `.db` file, and keep the copy outside the repo.
 
-The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, or access decisions. Existing tables gain nullable `teacher_id`, `teacher_source`, `teacher_review_reason`, `original_caption`, `topic_source`, and `topic_review_reason` columns, and the new `topics`, `upload_item_topics`, `lecture_topics`, `teacher_aliases`, and `admin_users` tables are created. Existing rows keep their values and are not auto-classified into topics. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
+The startup migrations are additive and idempotent. They never delete uploads, batches, lectures, users, access decisions, or delivered-media records. Existing tables gain nullable `teacher_id`, `teacher_source`, `teacher_review_reason`, `original_caption`, `topic_source`, `topic_review_reason`, and `access_expires_at` columns, and the new `topics`, `upload_item_topics`, `lecture_topics`, `teacher_aliases`, `admin_users`, and `student_media_messages` tables are created. Existing rows keep their values and are not auto-classified into topics. Existing approved users keep lifetime access because `access_expires_at` remains NULL. If an old database already has duplicate open batches, the unique open-batch index is skipped with a warning rather than merging or deleting data; resolve duplicates manually after inspection.
 
 ## Deploy on Render
 1. Push repo to GitHub.

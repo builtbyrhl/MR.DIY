@@ -33,6 +33,7 @@ _USER_ACCESS_NEW_COLUMNS = (
     ("access_requested_at", DateTime()),
     ("access_decided_at", DateTime()),
     ("access_decided_by", BigInteger()),
+    ("access_expires_at", DateTime()),
 )
 
 _USER_ACCESS_INDEX = "ix_users_access_status"

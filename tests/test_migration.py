@@ -70,6 +70,9 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
         has_admin_users = await connection.run_sync(
             lambda conn: inspect(conn).has_table("admin_users")
         )
+        has_student_media = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("student_media_messages")
+        )
 
     assert {
         "file_id",
@@ -87,6 +90,7 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
     assert has_lecture_topics is True
     assert has_teacher_aliases is True
     assert has_admin_users is True
+    assert has_student_media is True
     assert row.id == 1
     assert row.file_unique_id == "existing-unique-id"
     assert row.status == "classified"
@@ -156,6 +160,7 @@ async def test_startup_migration_preserves_existing_user_access(
         "access_requested_at",
         "access_decided_at",
         "access_decided_by",
+        "access_expires_at",
     } <= columns
     assert "ix_users_access_status" in indexes
     assert row.id == 999

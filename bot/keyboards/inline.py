@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.student_ui import (
     clamp_page,
@@ -25,17 +25,6 @@ def _nav_rows(prefix: str, page: int, pages: int) -> list[list[InlineKeyboardBut
             )
         )
     return [nav] if nav else []
-
-
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📚 Subjects"), KeyboardButton(text="🔍 Search")],
-            [KeyboardButton(text="⭐ Bookmarks"), KeyboardButton(text="📈 Progress")],
-            [KeyboardButton(text="💎 Premium"), KeyboardButton(text="❓ Help")],
-        ],
-        resize_keyboard=True,
-    )
 
 
 def request_access_kb(pending: bool = False) -> InlineKeyboardMarkup:

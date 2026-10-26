@@ -19,6 +19,7 @@ from bot.db.repo import (
 from bot.keyboards.inline import lecture_actions_kb
 from bot.services.access import has_library_access
 from bot.services.lecture_display import decorate_lecture_titles
+from bot.services.media_delivery import record_delivered_media
 from bot.student_ui import lecture_title
 
 router = Router()
@@ -171,7 +172,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
     try:
         if upload is not None:
             if upload.media_type == "video":
-                await bot.send_video(
+                sent = await bot.send_video(
                     chat_id=cb.from_user.id,
                     video=upload.file_id,
                     caption=lec.title,
@@ -179,7 +180,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
                     protect_content=True,
                 )
             elif upload.media_type == "document":
-                await bot.send_document(
+                sent = await bot.send_document(
                     chat_id=cb.from_user.id,
                     document=upload.file_id,
                     caption=lec.title,
@@ -194,7 +195,7 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
             if not settings.channel_id:
                 await cb.answer("Channel not configured", show_alert=True)
                 return
-            await bot.copy_message(
+            sent = await bot.copy_message(
                 chat_id=cb.from_user.id,
                 from_chat_id=settings.channel_id,
                 message_id=lec.channel_message_id,
@@ -207,6 +208,19 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
             show_alert=True,
         )
         return
+
+    try:
+        await record_delivered_media(
+            session,
+            user_id=db_user.id,
+            lecture_id=lec.id,
+            chat_id=cb.from_user.id,
+            message_id=getattr(sent, "message_id", None),
+        )
+    except Exception:
+        logger.exception("Failed to track delivered lecture #%s", lid)
+        await session.rollback()
+
     await mark_watched(session, db_user.id, lid)
     await cb.answer("Sent! Marked as watched ✅")
 

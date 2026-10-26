@@ -11,15 +11,20 @@ from aiogram.types import (
     Message,
 )
 
-from bot.keyboards.inline import access_review_kb
+from bot.keyboards.inline import access_review_kb, request_access_kb
 from bot.keyboards.reply import main_menu_kb
 from bot.services.access import (
     APPROVED,
     PENDING,
+    REJECTED,
+    access_expires_at,
+    access_is_expired,
     access_status,
     approve_access,
     display_name,
+    format_access_expiry,
     has_library_access,
+    list_expiring_access,
     list_pending,
     notify_admins,
     reject_access,
@@ -27,6 +32,7 @@ from bot.services.access import (
     revoke_access,
 )
 from bot.services.auth import is_admin
+from bot.services.media_delivery import retention_hours
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -41,27 +47,49 @@ def _is_admin_event(event) -> bool:
 
 async def _pending_view(session) -> tuple[str, InlineKeyboardMarkup | None]:
     users = await list_pending(session)
-    if not users:
+    expiring = await list_expiring_access(session)
+    if not users and not expiring:
         return "No pending access requests.", None
 
-    lines = [PENDING_HEADER, ""]
+    lines = []
     rows = []
-    for user in users:
-        lines.append(f"• {display_name(user)}")
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"✅ Approve {user.id}",
-                    callback_data=f"access:approve:{user.id}",
-                ),
-                InlineKeyboardButton(
-                    text=f"❌ Reject {user.id}",
-                    callback_data=f"access:reject:{user.id}",
-                ),
-            ]
+    if users:
+        lines.extend([PENDING_HEADER, ""])
+        for user in users:
+            lines.append(f"• {display_name(user)}")
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✅ Approve {user.id}",
+                        callback_data=f"access:approve:{user.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text=f"❌ Reject {user.id}",
+                        callback_data=f"access:reject:{user.id}",
+                    ),
+                ]
+            )
+        lines.append(
+            "\nUse /approveuser <id> [days], /rejectuser <id>, "
+            "or /revokeuser <id>."
         )
-    lines.append("\nUse /approveuser <id>, /rejectuser <id>, or /revokeuser <id>.")
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if expiring:
+        if lines:
+            lines.append("")
+        lines.append("Access expiring in the next 7 days:")
+        for user in expiring:
+            lines.append(
+                f"• {display_name(user)} — "
+                f"{format_access_expiry(access_expires_at(user))}"
+            )
+        lines.append(
+            "Use /approveuser <id> <days> to renew or extend access."
+        )
+
+    return "\n".join(lines), (
+        InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+    )
 
 
 async def _refresh_pending_message(cb: CallbackQuery, session) -> None:
@@ -82,6 +110,11 @@ async def _notify_decision(
             "✅ Your library access has been approved.\n\n"
             "Open the menu below to start studying."
         )
+        expires = access_expires_at(user)
+        if expires is not None:
+            text += (
+                f"\n\nAccess is valid until {format_access_expiry(expires)}."
+            )
         markup = main_menu_kb()
     elif revoked:
         text = "❌ Your library access has been revoked by an admin."
@@ -113,6 +146,22 @@ def _parse_target_id(message: Message) -> int | None:
     return user_id if user_id > 0 else None
 
 
+def _parse_approval_target(
+    message: Message,
+) -> tuple[int | None, int | None]:
+    parts = (message.text or "").split()
+    if len(parts) not in {2, 3}:
+        return None, None
+    try:
+        user_id = int(parts[1])
+        days = int(parts[2]) if len(parts) == 3 else None
+    except ValueError:
+        return None, None
+    if user_id <= 0 or (days is not None and days < 0):
+        return None, None
+    return user_id, days
+
+
 @router.message(Command("access"))
 async def access_list_cmd(message: Message, session):
     if not _is_admin_event(message):
@@ -125,17 +174,32 @@ async def access_list_cmd(message: Message, session):
 async def approve_user_cmd(message: Message, session, bot):
     if not _is_admin_event(message):
         return
-    user_id = _parse_target_id(message)
+    user_id, days = _parse_approval_target(message)
     if user_id is None:
-        await message.answer("Usage: /approveuser <user_id>")
+        await message.answer("Usage: /approveuser <user_id> [days]")
         return
     user = await approve_access(
-        session, user_id, message.from_user.id, create_missing=True
+        session,
+        user_id,
+        message.from_user.id,
+        create_missing=True,
+        days=days,
     )
     notified = await _notify_decision(bot, user, approved=True)
     suffix = "" if notified else " The user could not be notified."
+    if days is None:
+        expires = access_expires_at(user)
+        duration = (
+            f" until {format_access_expiry(expires)}"
+            if expires is not None
+            else ""
+        )
+    elif days == 0:
+        duration = " with lifetime access"
+    else:
+        duration = f" for {days} days"
     await message.answer(
-        f"Approved library access for {user_id}.{suffix}",
+        f"Approved library access for {user_id}{duration}.{suffix}",
         parse_mode=None,
     )
 
@@ -182,6 +246,69 @@ async def revoke_user_cmd(message: Message, session, bot):
     await message.answer(
         f"Revoked library access for {user_id}.{suffix}",
         parse_mode=None,
+    )
+
+
+@router.message(Command("myaccess"))
+@router.message(F.text == "🔑 My Access")
+async def my_access_cmd(message: Message, db_user):
+    status = access_status(db_user)
+    expires = access_expires_at(db_user)
+    retention = retention_hours()
+
+    if is_admin(db_user.id):
+        text = "🔑 *My Access*\n\nAdministrator access (no expiry)."
+        markup = None
+    elif status == APPROVED and not access_is_expired(db_user):
+        text = "🔑 *My Access*\n\n✅ Library access is active."
+        if expires is not None:
+            text += (
+                f"\nValid until {format_access_expiry(expires)}."
+            )
+        else:
+            text += "\nNo expiry date."
+        markup = None
+    elif status == APPROVED and access_is_expired(db_user):
+        text = (
+            "🔑 *My Access*\n\n"
+            f"⏳ Your library access expired on "
+            f"{format_access_expiry(expires)}.\n\n"
+            "Request a renewal below."
+        )
+        markup = request_access_kb()
+    elif status == PENDING:
+        if getattr(db_user, "access_requested_at", None):
+            text = (
+                "🔑 *My Access*\n\n"
+                "⏳ Your access request is awaiting admin review."
+            )
+            markup = request_access_kb(pending=True)
+        else:
+            text = (
+                "🔑 *My Access*\n\n"
+                "🔒 Library access has not been approved yet."
+            )
+            markup = request_access_kb()
+    elif status == REJECTED:
+        text = (
+            "🔑 *My Access*\n\n"
+            "❌ Your access request was not approved.\n\n"
+            "You can request access again."
+        )
+        markup = request_access_kb()
+    else:
+        text = (
+            "🔑 *My Access*\n\n"
+            "🔒 Library access has not been approved yet."
+        )
+        markup = request_access_kb()
+
+    text += (
+        f"\n\nLecture files sent to you are automatically removed "
+        f"after {retention} hours where Telegram permits."
+    )
+    await message.answer(
+        text, parse_mode="Markdown", reply_markup=markup
     )
 
 

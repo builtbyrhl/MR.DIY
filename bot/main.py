@@ -15,6 +15,7 @@ from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.services.auth import load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
+from bot.services.media_delivery import start_media_cleanup
 
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, access, admin, channel, review, ingest
 
@@ -59,6 +60,7 @@ async def run_polling():
     dp = build_dispatcher()
     await on_startup(bot)
     await bot.delete_webhook(drop_pending_updates=True)
+    cleanup_task = start_media_cleanup(bot)
     # Keep a tiny health endpoint for hosts (e.g. Northflank) that expect a port.
     if settings.port:
         app = web.Application()
@@ -71,7 +73,14 @@ async def run_polling():
         site = web.TCPSite(runner, settings.host, settings.port)
         await site.start()
         logger.info("Health server running on %s:%s", settings.host, settings.port)
-    await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
+    try:
+        await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def run_webhook():
@@ -80,6 +89,7 @@ async def run_webhook():
     dp = build_dispatcher()
     await on_startup(bot)
     await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
+    cleanup_task = start_media_cleanup(bot)
     app = web.Application()
     async def handle_webhook(request):
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
@@ -97,7 +107,14 @@ async def run_webhook():
     site = web.TCPSite(runner, settings.host, settings.port)
     await site.start()
     logger.info("Webhook running on %s:%s", settings.host, settings.port)
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 def main():

@@ -42,6 +42,7 @@ class User(Base):
     access_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     access_decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     access_decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    access_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     streak: Mapped[int] = mapped_column(Integer, default=0)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -237,6 +238,38 @@ class Bookmark(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="bookmarks")
+
+
+class StudentMediaMessage(Base):
+    __tablename__ = "student_media_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id", "message_id", name="uq_student_media_chat_message"
+        ),
+        Index("ix_student_media_pending_delete", "status", "delete_at"),
+        Index("ix_student_media_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    lecture_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("lectures.id", ondelete="SET NULL"), nullable=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    delete_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending"
+    )
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class Payment(Base):

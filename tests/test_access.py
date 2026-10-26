@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,7 @@ from bot.handlers.access import (
     access_decision_cb,
     access_list_cmd,
     approve_user_cmd,
+    my_access_cmd,
     reject_user_cmd,
     request_access_cb,
     revoke_user_cmd,
@@ -20,6 +22,8 @@ from bot.services.access import (
     APPROVED,
     PENDING,
     REJECTED,
+    access_expires_at,
+    access_is_expired,
     access_status,
     approve_access,
     has_library_access,
@@ -130,6 +134,117 @@ async def test_manual_approval_creates_missing_user(session):
     assert user.access_decided_by == 123
 
 
+async def test_expired_access_blocks_library_and_can_be_renewed(session):
+    user = await _add_user(
+        session,
+        status=APPROVED,
+        access_expires_at=datetime.utcnow() - timedelta(minutes=1),
+    )
+
+    assert access_is_expired(user) is True
+    assert has_library_access(user) is False
+
+    assert await request_access(session, user.id) is True
+    await session.refresh(user)
+    assert access_status(user) == PENDING
+    assert access_expires_at(user) is None
+
+    renewed = await approve_access(session, user.id, 123, days=2)
+    assert has_library_access(renewed) is True
+    assert access_is_expired(renewed) is False
+    assert renewed.access_expires_at > datetime.utcnow() + timedelta(days=1, hours=23)
+
+
+async def test_lifetime_approval_has_no_expiry_and_revocation_clears_it(session):
+    user = await approve_access(session, 7778, 123, create_missing=True, days=0)
+
+    assert access_expires_at(user) is None
+    assert has_library_access(user) is True
+
+    user = await approve_access(session, 7778, 123, days=3)
+    assert access_expires_at(user) is not None
+
+    user = await revoke_access(session, 7778, 123)
+    assert access_expires_at(user) is None
+    assert has_library_access(user) is False
+
+
+async def test_access_list_shows_pending_and_expiring_users(session):
+    pending = await _add_user(session, user_id=7781, status=PENDING)
+    expiring = await _add_user(
+        session,
+        user_id=7782,
+        status=APPROVED,
+        access_expires_at=datetime.utcnow() + timedelta(days=2),
+    )
+    message = _message(123, "/access")
+
+    await access_list_cmd(message, session)
+
+    text = message.answer.await_args.args[0]
+    assert f"({pending.id})" in text
+    assert f"({expiring.id})" in text
+    assert "expiring in the next 7 days" in text.lower()
+
+
+async def test_my_access_distinguishes_requested_and_unrequested(session):
+    unrequested = await _add_user(session, user_id=7784, status=PENDING)
+    message = _message(unrequested.id)
+    await my_access_cmd(message, unrequested)
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert "not been approved" in text
+    assert _button_data(markup) == ["request_access"]
+
+    requested = await _add_user(
+        session,
+        user_id=7785,
+        status=PENDING,
+        access_requested_at=datetime.utcnow(),
+    )
+    pending_message = _message(requested.id)
+    await my_access_cmd(pending_message, requested)
+    text = pending_message.answer.await_args.args[0]
+    markup = pending_message.answer.await_args.kwargs["reply_markup"]
+    assert "awaiting admin review" in text
+    assert _button_data(markup) == ["request_access"]
+
+
+async def test_my_access_shows_expired_status_and_renewal_button(session):
+    user = await _add_user(
+        session,
+        status=APPROVED,
+        access_expires_at=datetime.utcnow() - timedelta(hours=1),
+    )
+    message = _message(user.id)
+
+    await my_access_cmd(message, user)
+
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert "expired" in text.lower()
+    assert _button_data(markup) == ["request_access"]
+
+
+async def test_approve_command_accepts_optional_days(session):
+    bot = AsyncMock()
+    message = _message(123, "/approveuser 7780 7")
+
+    await approve_user_cmd(message, session, bot)
+
+    user = await session.get(User, 7780)
+    assert access_status(user) == APPROVED
+    assert access_is_expired(user) is False
+    assert user.access_expires_at > datetime.utcnow() + timedelta(days=6)
+    assert "for 7 days" in message.answer.await_args.args[0]
+
+    lifetime_message = _message(123, "/approveuser 7783 0")
+    await approve_user_cmd(lifetime_message, session, bot)
+    lifetime_user = await session.get(User, 7783)
+    assert access_expires_at(lifetime_user) is None
+    assert "lifetime access" in lifetime_message.answer.await_args.args[0]
+
+
 @pytest.mark.parametrize("status", [PENDING, REJECTED, None])
 async def test_start_unapproved_shows_request_button_not_menu(session, status):
     user = await _add_user(session, status=status)
@@ -155,7 +270,9 @@ async def test_start_approved_shows_student_menu(session):
 
     markup = message.answer.await_args.kwargs["reply_markup"]
     labels = [button.text for row in markup.keyboard for button in row]
-    assert "📚 Subjects" in labels
+    assert "📚 My Courses" in labels
+    assert "▶️ Continue" in labels
+    assert "🔑 My Access" in labels
     assert "🔍 Search" in labels
 
 
@@ -364,6 +481,36 @@ async def test_middleware_allows_approved_user_then_blocks_after_revocation(
     async with factory() as check:
         user = await check.get(User, 9203)
         assert access_status(user) == REJECTED
+
+
+async def test_middleware_blocks_expired_user_but_allows_my_access(
+    db, monkeypatch
+):
+    import bot.middlewares.db as db_middleware
+
+    _, factory = db
+    async with factory() as setup:
+        await _add_user(
+            setup,
+            user_id=9205,
+            status=APPROVED,
+            access_expires_at=datetime.utcnow() - timedelta(minutes=1),
+        )
+
+    monkeypatch.setattr(db_middleware, "get_session_factory", lambda: factory)
+    handler = AsyncMock(return_value="handled")
+
+    blocked_event = _middleware_event_message(9205, "/subjects")
+    assert await DbMiddleware()(
+        handler, blocked_event, {"event_from_user": _tg(9205)}
+    ) is None
+    assert "expired" in blocked_event.answer.await_args.args[0].lower()
+
+    allowed_event = _middleware_event_message(9205, "🔑 My Access")
+    assert await DbMiddleware()(
+        handler, allowed_event, {"event_from_user": _tg(9205)}
+    ) == "handled"
+    handler.assert_awaited_once()
 
 
 async def test_middleware_does_not_block_upload_inbox(db, monkeypatch):

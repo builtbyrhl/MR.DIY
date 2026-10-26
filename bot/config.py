@@ -28,6 +28,9 @@ class Settings:
     razorpay_key_id: str = field(default_factory=lambda: os.getenv("RAZORPAY_KEY_ID", ""))
     razorpay_key_secret: str = field(default_factory=lambda: os.getenv("RAZORPAY_KEY_SECRET", ""))
     free_lectures_per_day: int = field(default_factory=lambda: int(os.getenv("FREE_LECTURES_PER_DAY", "3")))
+    access_default_days: int = field(default_factory=lambda: int(os.getenv("ACCESS_DEFAULT_DAYS", "0")))
+    media_retention_hours: int = field(default_factory=lambda: int(os.getenv("MEDIA_RETENTION_HOURS", "24")))
+    media_cleanup_interval_seconds: int = field(default_factory=lambda: int(os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "300")))
 
     @property
     def is_webhook(self) -> bool:

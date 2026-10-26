@@ -10,6 +10,7 @@ from bot.handlers.bookmarks import show_bookmarks
 from bot.handlers.lectures import open_lecture
 from bot.handlers.progress import progress_entry
 from bot.handlers.search import back_search, search_cmd, search_page_callback
+from bot.handlers.start import continue_learning
 from bot.handlers.subjects import (
     open_subject,
     open_teacher_lectures,
@@ -301,6 +302,34 @@ async def test_progress_empty_state_links_to_subjects(session, ux_catalogue):
     markup = message.answer.await_args.kwargs["reply_markup"]
     assert "No published lectures yet" in text
     assert _button_data(markup) == ["subjects"]
+
+
+async def test_continue_empty_state_links_to_subjects(session, ux_catalogue):
+    _subject, user = ux_catalogue
+    message = _message(user.id)
+
+    await continue_learning(message, session, user)
+
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert "No lectures started yet" in text
+    assert _button_data(markup) == ["subjects"]
+
+
+async def test_continue_resumes_last_watched_lecture(
+    session, ux_catalogue
+):
+    subject, user = ux_catalogue
+    lecture = (await _lectures(session, subject.id, ["Heart"]))[0]
+    await mark_watched(session, user.id, lecture.id)
+    message = _message(user.id)
+
+    await continue_learning(message, session, user)
+
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert "Heart" in text
+    assert f"lec:{lecture.id}" in _button_data(markup)
 
 
 def test_access_denial_is_specific_to_request_state():

@@ -368,6 +368,7 @@ async def _show_teacher_topic_lectures(
     return True
 
 
+@router.message(F.text == "📚 My Courses")
 @router.message(F.text == "📚 Subjects")
 async def subjects_cmd(message: Message, session):
     await ensure_subjects(session)

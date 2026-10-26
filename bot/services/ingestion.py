@@ -104,6 +104,15 @@ FINAL_LECTURE_NUMBER = re.compile(r"^[Ll]([1-9]\d{0,2})$")
 LECTURE_FIELD_PREFIX = re.compile(
     r"^(?:lecture|lec|class|video|part)\b", re.IGNORECASE
 )
+FILENAME_LEADING_NUMBER = re.compile(
+    r"^\s*"
+    r"(?:(?:lecture|lec|class|video|part)\s+)?"
+    r"(?:[Ll]\s*)?"
+    r"(\d{1,3})"
+    r"(?![0-9A-Za-z])"
+    r"(?:\s*[.)\-:#_]\s*|\s+|$)",
+    re.IGNORECASE,
+)
 
 
 def _extract_numbers(text: str) -> list[int]:
@@ -120,6 +129,48 @@ def _extract_numbers(text: str) -> list[int]:
         if 1 <= number <= 999 and number not in numbers:
             numbers.append(number)
     return numbers
+
+
+def _clean_filename_title(raw: str) -> Optional[str]:
+    title = raw.replace("_", " ")
+    title = " ".join(title.split())
+    title = title.strip(" \t-—–:|,;._")
+    return title or None
+
+
+def parse_filename(file_name: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    """Extract a leading lecture number and title from a media filename.
+
+    Only a number at the very start of the filename is treated as a lecture
+    number. Titles that start with another number are considered ambiguous and
+    are not used automatically.
+    """
+    if not file_name:
+        return None, None
+
+    name = file_name.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.startswith(".") and name.count(".") == 1:
+        return None, None
+    stem = os.path.splitext(name)[0]
+    stem = " ".join(stem.split())
+    if not stem:
+        return None, None
+
+    match = FILENAME_LEADING_NUMBER.match(stem)
+    if match:
+        number = int(match.group(1))
+        if not 1 <= number <= 999:
+            return None, None
+        title = _clean_filename_title(stem[match.end() :])
+        if not title:
+            return number, None
+        if title[0].isdigit():
+            return None, None
+        return number, title
+
+    if stem[0].isdigit():
+        return None, None
+    return None, _clean_filename_title(stem)
 
 
 def _split_teacher(title: str) -> tuple[Optional[str], Optional[str], bool]:
@@ -648,7 +699,10 @@ def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCap
         if slash is not None:
             return slash
 
+    file_number, file_title = parse_filename(file_name)
     numbers = _extract_numbers(text)
+    if not numbers and file_number is not None:
+        numbers = [file_number]
     if not numbers and file_name:
         stem = os.path.splitext(os.path.basename(file_name))[0].strip()
         numbers = _extract_numbers(stem)
@@ -663,7 +717,9 @@ def parse_caption(caption: Optional[str], file_name: Optional[str]) -> ParsedCap
             title = line
             break
 
-    if not title and file_name:
+    if not title and file_title:
+        title = file_title
+    elif not title and file_name:
         title = os.path.splitext(os.path.basename(file_name))[0].strip()
 
     if title:

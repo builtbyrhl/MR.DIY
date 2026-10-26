@@ -51,15 +51,18 @@ Admin membership is re-read from the database at the start of each update, so se
    - `/skip <item>` / `/keep <item>` / `/retry <item>`
    - `/setcourse <item> <course_id>` / `/setnumber <item> <n>`
    - `/settopic <item_ids>|<topic_ids|none>`
-   - `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->`
-   - `/setcaption <item>|<caption>` (unapproved, non-skipped items only)
-   - `/refreshcaptions <batch_id> [apply]` (preview first; apply only updates non-preferred captions)
-   - `/pause` / `/resume`
+    - `/assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->`
+    - `/setteacherplan <batch:<id>|items:<id,id,...>>|<teacher_id|teacher name> [apply]` (preview first; apply assigns an existing subject-scoped teacher to eligible unapproved items and flags missing/ambiguous teachers for review)
+    - `/setcaption <item>|<caption>` (unapproved, non-skipped items only)
+    - `/refreshcaptions <batch_id> [apply]` (preview first; apply only updates non-preferred captions)
+    - `/generatecaptions <batch_id> [apply]` (preview first; apply generates pipe captions from filenames using existing course, teacher, and topic metadata; valid captions are preserved)
+    - `/pause` / `/resume`
 7. Duplicates and uncertain year/number go to `needs_review`; nothing is assumed automatically. Teacher and topic metadata are optional and are only assigned when the caption format and an existing subject-scoped teacher/topic match are unambiguous.
 8. Approving a batch closes that batch. Uploads received after approval create a new open batch for the same day. Editing an upload's caption in the inbox reclassifies it while unapproved; edits to approved, publishing, published, or skipped items are ignored and keep the original caption for audit.
 9. Approved batches are locked. `/skip`, `/keep`, `/retry`, `/setcourse`, `/setnumber`, and `/setcaption` are rejected on approved items. Teacher and topic assignment remains available because it only changes catalogue metadata.
 10. Publishing is idempotent for completed items: `/publish` skips items that already have a published message ID. If the bot stops after Telegram accepts a send but before the database commit, or Telegram times out/loses the response, the item is left in `publishing` and is **not auto-resent**. Definite Telegram rejections, including flood-control `429` responses, are marked `failed` and can be retried; wait for the reported retry delay first. For an uncertain state, verify the destination topic. If the message exists, use `/reconcilepublish <item>|<message_id>|<destination_chat_id>|<topic_id>` to record it without sending again. If it does not exist, use `/unlockpublish <item>` and `/publish <id>` deliberately. Never unlock an item whose message already exists.
-11. `/batch` and `/dryrun` show the current teacher and topic assignments plus any automatic matching failure reason for every item.
+ 11. `/batch` and `/dryrun` show the current teacher and topic assignments plus any automatic matching failure reason for every item.
+ 12. Filename fallback: the bot stores `video.file_name` or `document.file_name` when Telegram provides it. It strips the extension and reads a leading lecture number such as `08 Posterior Triangle of Neck.mp4` as `L8` with title `Posterior Triangle of Neck`. `/generatecaptions` can turn that filename data into the standard pipe caption only when the item already has a course, teacher, and single topic. If Telegram does not expose a filename, the number/title is missing, or required metadata is missing, the item is left for manual review.
 
 ## Topic organization
 

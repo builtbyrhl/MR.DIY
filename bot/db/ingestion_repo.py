@@ -354,6 +354,30 @@ async def _teacher_assignment_error(
     return None
 
 
+async def flag_item_teacher_review(
+    session: AsyncSession, item_id: int, reason: str
+) -> Optional[UploadItem]:
+    """Flag an unresolved teacher decision without changing existing metadata."""
+    item = await session.get(UploadItem, item_id)
+    if item is None:
+        return None
+
+    batch = await session.get(UploadBatch, item.batch_id)
+    if batch is not None and batch.status == "approved":
+        return item
+    if (
+        item.status in {"skipped", "publishing", "published"}
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return item
+
+    item.teacher_review_reason = reason
+    _recompute_item_status(item)
+    await session.commit()
+    await session.refresh(item)
+    return item
+
+
 async def _apply_teacher_assignment(
     session: AsyncSession, item: UploadItem, teacher_id: Optional[int]
 ) -> None:

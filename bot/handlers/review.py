@@ -16,6 +16,7 @@ from aiogram.types import Message
 from bot.db.ingestion_repo import (
     approve_batch,
     assign_item,
+    flag_item_teacher_review,
     get_batch,
     get_batch_items,
     get_course,
@@ -35,6 +36,7 @@ from bot.db.repo import (
     add_teacher,
     add_teacher_alias,
     add_topic,
+    find_matching_teachers,
     get_subject,
     list_item_topics,
     list_teacher_aliases,
@@ -52,6 +54,7 @@ from bot.services.ingestion import (
     CAPTION_EDIT_BLOCKED_STATUSES,
     keep_item,
     parse_caption,
+    parse_filename,
     pause_ingestion,
     preferred_caption_error,
     reclassify_item_caption,
@@ -343,6 +346,149 @@ def _source_unavailable_note(plan: _CaptionRefreshPlan) -> str:
     if not plan.source_error:
         return ""
     return f" (source unavailable: {plan.source_error})"
+
+
+@dataclass
+class _GeneratedCaptionPlan:
+    item: UploadItem
+    action: str
+    reason: str
+    generated_caption: Optional[str] = None
+    file_number: Optional[int] = None
+    file_title: Optional[str] = None
+
+
+def _sanitize_caption_field(value: Optional[str]) -> str:
+    return " ".join((value or "").split()).replace("|", "/")
+
+
+async def _generated_caption_plan(
+    session, item: UploadItem
+) -> _GeneratedCaptionPlan:
+    current_error = preferred_caption_error(item.raw_caption, item.file_name)
+    file_number, file_title = parse_filename(item.file_name)
+
+    if item.status == "skipped":
+        return _GeneratedCaptionPlan(
+            item, "skip", "item is skipped", file_number=file_number, file_title=file_title
+        )
+    if (
+        item.status in CAPTION_EDIT_BLOCKED_STATUSES
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "item is publishing, published, or otherwise locked",
+            file_number=file_number,
+            file_title=file_title,
+        )
+    if current_error is None:
+        return _GeneratedCaptionPlan(
+            item,
+            "preserve",
+            "current caption is already valid",
+            file_number=file_number,
+            file_title=file_title,
+        )
+    if file_number is None or not file_title:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "filename has no clear lecture number and title",
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    course = None
+    if item.course_id is not None:
+        course = await get_course(session, item.course_id)
+    if course is None or course.subject is None:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "course/subject missing; assign a course before generating captions",
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    teacher = None
+    if item.teacher_id is not None:
+        teacher = await session.get(Teacher, item.teacher_id)
+    if teacher is None or teacher.subject_id != course.subject_id:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "teacher missing; assign a teacher before generating captions",
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    topics = await list_item_topics(session, item.id)
+    if not topics:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "topic missing; assign a topic before generating captions",
+            file_number=file_number,
+            file_title=file_title,
+        )
+    if len(topics) > 1:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "multiple topics assigned; keep exactly one topic before generating captions",
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    subject_name = _sanitize_caption_field(course.subject.name)
+    teacher_name = _sanitize_caption_field(teacher.name)
+    topic_name = _sanitize_caption_field(topics[0].name)
+    video_title = _sanitize_caption_field(file_title)
+    if not subject_name or not teacher_name or not topic_name or not video_title:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            "generated caption has an empty field",
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    generated_caption = (
+        f"{subject_name} | {teacher_name} | {topic_name} | "
+        f"{video_title} | L{file_number}"
+    )
+    generated_error = preferred_caption_error(generated_caption, None)
+    if generated_error is not None:
+        return _GeneratedCaptionPlan(
+            item,
+            "skip",
+            f"generated caption is invalid: {generated_error}",
+            generated_caption=generated_caption,
+            file_number=file_number,
+            file_title=file_title,
+        )
+
+    return _GeneratedCaptionPlan(
+        item,
+        "update",
+        "generate caption from filename and existing metadata",
+        generated_caption=generated_caption,
+        file_number=file_number,
+        file_title=file_title,
+    )
+
+
+def _generated_plan_lines(plan: _GeneratedCaptionPlan) -> list[str]:
+    lines = [
+        f"#{plan.item.id} [{plan.item.status}] action: {plan.action} - {plan.reason}",
+        f"  current: {plan.item.raw_caption or '(none)'}",
+        f"  filename: {plan.item.file_name or '(none)'}",
+    ]
+    if plan.generated_caption is not None:
+        lines.append(f"  proposed: {plan.generated_caption}")
+    return lines
 
 
 def _args_raw(message: Message, command: str) -> str:
@@ -704,6 +850,429 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
         f"Caption refresh applied to batch #{batch.id}: {updated} updated, "
         f"{reclassified} reclassified, {preserved} preserved, "
         f"{skipped} skipped, {failed} failed."
+    )
+    await _reply_plain_lines(message, [header, *lines])
+
+
+@router.message(Command("generatecaptions"))
+async def generatecaptions_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/generatecaptions")
+    if (
+        len(args) not in {1, 2}
+        or not args[0].isdigit()
+        or (len(args) == 2 and args[1].casefold() != "apply")
+    ):
+        await message.answer(
+            "Usage: /generatecaptions <batch_id> [apply]\n"
+            "Preview generated pipe captions from filenames and existing "
+            "course/teacher/topic metadata. Apply updates only items that do "
+            "not already have a valid caption. It never approves or publishes.",
+            parse_mode=None,
+        )
+        return
+
+    apply_changes = len(args) == 2
+    batch = await get_batch(session, int(args[0]))
+    if not batch:
+        await message.answer("Batch not found.")
+        return
+    if apply_changes and batch.status != "open":
+        await message.answer(
+            f"Batch #{batch.id} is {batch.status}; no changes were applied.",
+            parse_mode=None,
+        )
+        return
+
+    items = await get_batch_items(session, batch.id)
+    if not items:
+        await message.answer("Batch has no items.")
+        return
+
+    plans: list[_GeneratedCaptionPlan] = []
+    for item in items:
+        plans.append(await _generated_caption_plan(session, item))
+
+    if not apply_changes:
+        lines = [
+            f"Caption generation preview - batch #{batch.id} ({len(items)} items). "
+            "No database changes made.",
+            "Add 'apply' to update items without a valid caption. Valid "
+            "captions are preserved. No messages will be published.",
+        ]
+        for plan in plans:
+            lines.extend(_generated_plan_lines(plan))
+        await _reply_plain_lines(message, lines)
+        return
+
+    updated = 0
+    preserved = 0
+    skipped = 0
+    failed = 0
+    lines: list[str] = []
+
+    for plan in plans:
+        item = plan.item
+        if plan.action == "preserve":
+            preserved += 1
+            lines.append(f"#{item.id}: kept current valid caption")
+            continue
+        if plan.action == "skip":
+            skipped += 1
+            lines.append(f"#{item.id}: skipped - {plan.reason}")
+            continue
+
+        try:
+            refreshed, error = await set_item_caption(
+                session, item.id, plan.generated_caption
+            )
+        except ApprovedBatchError as exc:
+            await session.rollback()
+            skipped += 1
+            lines.append(f"#{item.id}: skipped - {exc}")
+            continue
+        except Exception as exc:
+            await session.rollback()
+            logger.exception(
+                "Caption generation failed for item #%s in batch #%s",
+                item.id,
+                batch.id,
+            )
+            failed += 1
+            lines.append(f"#{item.id}: failed - {exc}")
+            continue
+
+        if error:
+            failed += 1
+            lines.append(f"#{item.id}: failed - {error}")
+            continue
+        if refreshed is None:
+            skipped += 1
+            lines.append(f"#{item.id}: skipped")
+            continue
+
+        updated += 1
+        lines.append(
+            f"#{item.id}: caption generated -> {_item_line(refreshed)}"
+        )
+
+    header = (
+        f"Caption generation applied to batch #{batch.id}: {updated} updated, "
+        f"{preserved} preserved, {skipped} skipped, {failed} failed."
+    )
+    await _reply_plain_lines(message, [header, *lines])
+
+
+@dataclass
+class _TeacherPlan:
+    item: UploadItem
+    action: str
+    reason: str
+    current_teacher: Optional[Teacher] = None
+    proposed_teacher: Optional[Teacher] = None
+
+
+def _teacher_label(teacher: Optional[Teacher]) -> str:
+    if teacher is None:
+        return "not specified"
+    return f"#{teacher.id} {teacher.name}"
+
+
+def _teacher_plan_scope(raw: str):
+    raw = raw.strip()
+    if raw.startswith("batch:"):
+        value = raw[len("batch:"):].strip()
+        if value.isdigit() and int(value) > 0:
+            return ("batch", int(value)), None
+        return None, "Batch ID must be a positive number."
+    if raw.startswith("items:"):
+        value = raw[len("items:"):].strip()
+        item_ids, error = _bulk_item_ids(value)
+        if error:
+            return None, error
+        return ("items", item_ids), None
+    return None, "Scope must be batch:<id> or items:<id,id,...>."
+
+
+def _teacher_spec(raw: str):
+    raw = raw.strip()
+    if not raw:
+        return None, "Teacher ID or name is required."
+    if raw.casefold() == "none":
+        return None, "Use /setteacher to clear a teacher."
+    if raw.isdigit():
+        teacher_id = int(raw)
+        if teacher_id <= 0:
+            return None, "Teacher ID must be a positive number."
+        return ("id", teacher_id), None
+    return ("name", raw), None
+
+
+async def _teacher_change_blocker(session, item: UploadItem) -> Optional[str]:
+    if item.status == "skipped":
+        return "item is skipped"
+    if (
+        item.status in CAPTION_EDIT_BLOCKED_STATUSES
+        or item.publication_status in {"publishing", "published"}
+    ):
+        return "item is publishing, published, or otherwise locked"
+    batch = await get_batch(session, item.batch_id)
+    if batch is not None and batch.status == "approved":
+        return "batch is approved"
+    return None
+
+
+async def _teacher_plan(
+    session, item: UploadItem, spec: tuple
+) -> _TeacherPlan:
+    current_teacher = None
+    if item.teacher_id is not None:
+        current_teacher = await session.get(Teacher, item.teacher_id)
+
+    blocker = await _teacher_change_blocker(session, item)
+    if blocker:
+        return _TeacherPlan(
+            item, "skip", blocker, current_teacher=current_teacher
+        )
+
+    course = None
+    if item.course_id is not None:
+        course = await get_course(session, item.course_id)
+    if course is None or course.subject is None:
+        return _TeacherPlan(
+            item,
+            "skip",
+            "course/subject missing; cannot resolve a subject-scoped teacher",
+            current_teacher=current_teacher,
+        )
+
+    subject_id = course.subject_id
+    if spec[0] == "id":
+        teacher = await session.get(Teacher, spec[1])
+        if teacher is None:
+            return _TeacherPlan(
+                item,
+                "missing",
+                f"teacher not found: #{spec[1]}",
+                current_teacher=current_teacher,
+            )
+        if teacher.subject_id != subject_id:
+            return _TeacherPlan(
+                item,
+                "missing",
+                (
+                    f"teacher #{teacher.id} {teacher.name} belongs to a "
+                    "different subject"
+                ),
+                current_teacher=current_teacher,
+            )
+        proposed = teacher
+    else:
+        matches = await find_matching_teachers(session, subject_id, spec[1])
+        if not matches:
+            return _TeacherPlan(
+                item,
+                "missing",
+                f"teacher not found: {spec[1]}",
+                current_teacher=current_teacher,
+            )
+        if len(matches) > 1:
+            labels = ", ".join(
+                f"#{teacher.id} {teacher.name}" for teacher in matches
+            )
+            return _TeacherPlan(
+                item,
+                "ambiguous",
+                f"ambiguous teacher: {spec[1]} ({labels})",
+                current_teacher=current_teacher,
+            )
+        proposed = matches[0]
+
+    if current_teacher is not None and current_teacher.id == proposed.id:
+        return _TeacherPlan(
+            item,
+            "preserve",
+            "teacher is already assigned",
+            current_teacher=current_teacher,
+            proposed_teacher=proposed,
+        )
+
+    return _TeacherPlan(
+        item,
+        "update",
+        "assign proposed teacher",
+        current_teacher=current_teacher,
+        proposed_teacher=proposed,
+    )
+
+
+def _teacher_plan_lines(plan: _TeacherPlan) -> list[str]:
+    current = _teacher_label(plan.current_teacher)
+    proposed = (
+        _teacher_label(plan.proposed_teacher)
+        if plan.proposed_teacher is not None
+        else "(none)"
+    )
+    return [
+        f"#{plan.item.id} [{plan.item.status}] current: {current} -> "
+        f"proposed: {proposed} - {plan.action}: {plan.reason}"
+    ]
+
+
+@router.message(Command("setteacherplan"))
+async def setteacherplan_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    raw = _args_raw(message, "/setteacherplan")
+    apply_changes = False
+    if raw.casefold().endswith(" apply"):
+        apply_changes = True
+        raw = raw[:-6].strip()
+
+    parts = [part.strip() for part in raw.split("|", 1)]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        await message.answer(
+            "Usage: /setteacherplan <batch:<id>|items:<id,id,...>>|"
+            "<teacher_id|teacher name> [apply]\n"
+            "Example: /setteacherplan batch:7|Dr New Teacher\n"
+            "Example: /setteacherplan items:55,56|4 apply\n"
+            "Preview first. Apply assigns existing teachers and flags "
+            "missing/ambiguous teachers for review. It never approves or "
+            "publishes.",
+            parse_mode=None,
+        )
+        return
+
+    scope, error = _teacher_plan_scope(parts[0])
+    if error:
+        await message.answer(error, parse_mode=None)
+        return
+    spec, error = _teacher_spec(parts[1])
+    if error:
+        await message.answer(error, parse_mode=None)
+        return
+
+    batch = None
+    missing_item_ids: list[int] = []
+    if scope[0] == "batch":
+        batch = await get_batch(session, scope[1])
+        if batch is None:
+            await message.answer("Batch not found.", parse_mode=None)
+            return
+        items = await get_batch_items(session, batch.id)
+        scope_label = f"batch #{batch.id}"
+    else:
+        items = []
+        for item_id in scope[1]:
+            item = await session.get(UploadItem, item_id)
+            if item is None:
+                missing_item_ids.append(item_id)
+            else:
+                items.append(item)
+        if missing_item_ids:
+            await message.answer(
+                "Item not found: " + ", ".join(map(str, missing_item_ids)),
+                parse_mode=None,
+            )
+            return
+        scope_label = "selected items"
+
+    if not items:
+        await message.answer("No items to update.", parse_mode=None)
+        return
+
+    plans: list[_TeacherPlan] = []
+    for item in items:
+        plans.append(await _teacher_plan(session, item, spec))
+
+    if not apply_changes:
+        lines = [
+            f"Teacher assignment preview - {scope_label} ({len(items)} items). "
+            "No database changes made.",
+            "Add 'apply' to assign the proposed teacher. Missing or "
+            "ambiguous teachers are flagged for review. Subject and topic "
+            "assignments are unchanged. No messages will be published.",
+        ]
+        for plan in plans:
+            lines.extend(_teacher_plan_lines(plan))
+        await _reply_plain_lines(message, lines)
+        return
+
+    if batch is not None and batch.status != "open":
+        await message.answer(
+            f"Batch #{batch.id} is {batch.status}; no changes were applied.",
+            parse_mode=None,
+        )
+        return
+
+    updated = 0
+    preserved = 0
+    skipped = 0
+    flagged = 0
+    failed = 0
+    lines: list[str] = []
+
+    updates_by_teacher: dict[int, list[_TeacherPlan]] = {}
+    flags: list[_TeacherPlan] = []
+    for plan in plans:
+        if plan.action == "update":
+            updates_by_teacher.setdefault(
+                plan.proposed_teacher.id, []
+            ).append(plan)
+        elif plan.action in {"missing", "ambiguous"}:
+            flags.append(plan)
+        elif plan.action == "preserve":
+            preserved += 1
+            lines.append(f"#{plan.item.id}: teacher already assigned")
+        else:
+            skipped += 1
+            lines.append(f"#{plan.item.id}: skipped - {plan.reason}")
+
+    for teacher_id, group in updates_by_teacher.items():
+        try:
+            teacher, assigned, errors = await set_items_teacher_bulk(
+                session, [plan.item.id for plan in group], teacher_id
+            )
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "Bulk teacher assignment failed for teacher #%s", teacher_id
+            )
+            failed += len(group)
+            for plan in group:
+                lines.append(f"#{plan.item.id}: failed - bulk assignment error")
+            continue
+
+        if errors:
+            failed += len(group)
+            for plan in group:
+                lines.append(f"#{plan.item.id}: failed - {errors[0]}")
+            continue
+
+        assert teacher is not None
+        updated += len(assigned)
+        for plan in group:
+            lines.append(
+                f"#{plan.item.id}: teacher set to "
+                f"#{teacher.id} {teacher.name}"
+            )
+
+    for plan in flags:
+        flagged_item = await flag_item_teacher_review(
+            session, plan.item.id, plan.reason
+        )
+        if flagged_item is None:
+            failed += 1
+            lines.append(f"#{plan.item.id}: failed - item not found")
+            continue
+        flagged += 1
+        lines.append(f"#{plan.item.id}: flagged - {plan.reason}")
+
+    header = (
+        f"Teacher assignment applied: {updated} updated, "
+        f"{preserved} preserved, {flagged} flagged, {skipped} skipped, "
+        f"{failed} failed."
     )
     await _reply_plain_lines(message, [header, *lines])
 

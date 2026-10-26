@@ -489,7 +489,12 @@ async def list_topics(session: AsyncSession, subject_id: int) -> list[Topic]:
 async def find_matching_topics(
     session: AsyncSession, subject_id: int, name: str
 ) -> list[Topic]:
-    """Return topics in one subject whose normalized names match exactly."""
+    """Return topics in one subject whose normalized names match exactly.
+
+    Legacy rows can have a stale ``normalized_name`` value while still having
+    a valid display ``name``. The fallback compares the current normalization
+    of both columns so ``/topics`` and caption classification agree.
+    """
     normalized = normalize_topic_name(name)
     if not normalized:
         return []
@@ -501,7 +506,21 @@ async def find_matching_topics(
         )
         .order_by(Topic.id)
     )
-    return list(res.scalars().all())
+    topics = list(res.scalars().all())
+    if topics:
+        return topics
+
+    res = await session.execute(
+        select(Topic)
+        .where(Topic.subject_id == subject_id)
+        .order_by(Topic.id)
+    )
+    return [
+        topic
+        for topic in res.scalars().all()
+        if normalize_topic_name(topic.name) == normalized
+        or normalize_topic_name(topic.normalized_name or "") == normalized
+    ]
 
 
 async def add_topic(
@@ -520,13 +539,9 @@ async def add_topic(
     if not normalized:
         return None, "Topic name is required."
 
-    existing = await session.scalar(
-        select(Topic).where(
-            Topic.subject_id == subject_id,
-            Topic.normalized_name == normalized,
-        )
-    )
-    if existing is not None:
+    existing_topics = await find_matching_topics(session, subject_id, clean_name)
+    if existing_topics:
+        existing = existing_topics[0]
         return None, f"Topic already exists: #{existing.id} {existing.name}."
 
     topic = Topic(

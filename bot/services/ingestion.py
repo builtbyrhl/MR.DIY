@@ -113,6 +113,8 @@ FILENAME_LEADING_NUMBER = re.compile(
     r"(?:\s*[.)\-:#_]\s*|\s+|$)",
     re.IGNORECASE,
 )
+FILENAME_TRIM_CHARS = " \t-—–:|,;._"
+FILENAME_NOISE_TOKENS = frozenset({"atf"})
 
 
 def _extract_numbers(text: str) -> list[int]:
@@ -134,13 +136,19 @@ def _extract_numbers(text: str) -> list[int]:
 def _clean_filename_title(raw: str) -> Optional[str]:
     title = raw.replace("_", " ")
     title = " ".join(title.split())
-    title = title.strip(" \t-—–:|,;._")
+    title = title.strip(FILENAME_TRIM_CHARS)
+    tokens = title.split()
+    while len(tokens) > 1 and tokens[-1] in FILENAME_NOISE_TOKENS:
+        tokens.pop()
+    title = " ".join(tokens).strip(FILENAME_TRIM_CHARS)
     return title or None
 
 
 def parse_filename(file_name: Optional[str]) -> tuple[Optional[int], Optional[str]]:
-    """Extract a leading lecture number and title from a media filename.
+    """Extract a leading lecture number and cleaned title from a media filename.
 
+    The path and extension are removed, repeated whitespace and underscores are
+    normalized, and a recognized standalone trailing noise token is dropped.
     Only a number at the very start of the filename is treated as a lecture
     number. Titles that start with another number are considered ambiguous and
     are not used automatically.

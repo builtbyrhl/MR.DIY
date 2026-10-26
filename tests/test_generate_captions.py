@@ -10,7 +10,7 @@ from bot.db.ingestion_repo import (
     set_item_topics,
     skip_item,
 )
-from bot.db.models import Course, Subject
+from bot.db.models import Course, Subject, UploadItem
 from bot.db.repo import add_teacher, add_topic
 from bot.handlers import review
 from bot.services.ingestion import ingest_media, parse_filename
@@ -97,6 +97,48 @@ def test_parse_filename_extracts_leading_numbers_and_strips_extensions():
             "C:\\videos\\08 Posterior Triangle of Neck.mp4",
             8,
             "Posterior Triangle of Neck",
+        ),
+    ):
+        assert parse_filename(filename) == (number, title)
+
+
+def test_parse_filename_cleans_trailing_atf_noise():
+    for filename, number, title in (
+        ("1. Lumbosacral Plexus atf.mp4", 1, "Lumbosacral Plexus"),
+        (
+            "1.  Lumbosacral   Plexus  atf.mp4",
+            1,
+            "Lumbosacral Plexus",
+        ),
+        ("2. Common Peroneal Nerve atf.mp4", 2, "Common Peroneal Nerve"),
+        (
+            "8. Gluteal Region Greater & Lesser Sciatic Foramen atf.mp4",
+            8,
+            "Gluteal Region Greater & Lesser Sciatic Foramen",
+        ),
+        (
+            "10. Vessels of Lower Limb - Popliteal Fossa.mp4",
+            10,
+            "Vessels of Lower Limb - Popliteal Fossa",
+        ),
+    ):
+        assert parse_filename(filename) == (number, title)
+
+
+def test_parse_filename_preserves_meaningful_atf_like_tokens():
+    for filename, number, title in (
+        ("11. ATF Receptor Signaling.mp4", 11, "ATF Receptor Signaling"),
+        (
+            "12. Catfish and ATF3 Signaling.mp4",
+            12,
+            "Catfish and ATF3 Signaling",
+        ),
+        ("13. ATF.mp4", 13, "ATF"),
+        ("14. Lipid Metabolism ATF.mp4", 14, "Lipid Metabolism ATF"),
+        (
+            "Posterior Triangle atf receptor.mp4",
+            None,
+            "Posterior Triangle atf receptor",
         ),
     ):
         assert parse_filename(filename) == (number, title)
@@ -207,6 +249,61 @@ async def test_generate_captions_preview_and_apply_use_existing_metadata(
     apply_text = _answer_text(apply)
     assert "1 updated" in apply_text
     assert "caption generated" in apply_text
+
+
+async def test_generate_captions_cleans_filenames_and_keeps_numbers_in_number_field(
+    session, caption_catalogue
+):
+    cat = caption_catalogue
+    cases = (
+        ("1. Lumbosacral Plexus atf.mp4", 1, "Lumbosacral Plexus"),
+        ("2. Common Peroneal Nerve atf.mp4", 2, "Common Peroneal Nerve"),
+        (
+            "8. Gluteal Region Greater & Lesser Sciatic Foramen atf.mp4",
+            8,
+            "Gluteal Region Greater & Lesser Sciatic Foramen",
+        ),
+        (
+            "10. Vessels of Lower Limb - Popliteal Fossa.mp4",
+            10,
+            "Vessels of Lower Limb - Popliteal Fossa",
+        ),
+        ("11. ATF Receptor Signaling.mp4", 11, "ATF Receptor Signaling"),
+        (
+            "12. Catfish and ATF3 Signaling.mp4",
+            12,
+            "Catfish and ATF3 Signaling",
+        ),
+    )
+    expected: dict[int, str] = {}
+    for index, (file_name, number, title) in enumerate(cases, start=60):
+        item = await _ingest(
+            session, index, caption=None, file_name=file_name
+        )
+        await _assign_metadata(session, item, cat)
+        expected[item.id] = (
+            "Anatomy | Dr Mohammad Azam Sir | Abdomen | "
+            f"{title} | L{number}"
+        )
+
+    preview = _generate_message(item.batch_id)
+    await review.generatecaptions_cmd(preview, session)
+    preview_text = _answer_text(preview)
+    for caption in expected.values():
+        assert caption in preview_text
+
+    for item_id in expected:
+        stored = await session.get(UploadItem, item_id)
+        assert stored.raw_caption is None
+
+    apply = _generate_message(item.batch_id, apply=True)
+    await review.generatecaptions_cmd(apply, session)
+
+    for item_id, caption in expected.items():
+        stored = await session.get(UploadItem, item_id)
+        assert stored.raw_caption == caption
+        assert stored.lecture_number == int(caption.rsplit("L", 1)[1])
+    assert "6 updated" in _answer_text(apply)
 
 
 async def test_generate_captions_skips_missing_metadata(

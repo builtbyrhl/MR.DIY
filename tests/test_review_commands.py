@@ -10,6 +10,9 @@ from bot.handlers import review
 from bot.services.ingestion import ingest_media, set_item_caption
 
 PREFERRED_CAPTION = "Anatomy A | Dr A | Skull | Introduction"
+PREFERRED_CAPTION_WITH_NUMBER = (
+    "Anatomy A | Dr A | Skull | Introduction | L2"
+)
 STALE_CAPTION = "Anatomy A | Skull | Lecture 2 | Dr A"
 
 
@@ -256,10 +259,10 @@ async def test_refreshcaptions_apply_updates_non_preferred_caption(
     await review.refreshcaptions_cmd(message, session, bot)
 
     await session.refresh(item)
-    assert item.raw_caption == PREFERRED_CAPTION
+    assert item.raw_caption == PREFERRED_CAPTION_WITH_NUMBER
     assert item.original_caption == STALE_CAPTION
     assert item.title == "Introduction"
-    assert item.lecture_number is None
+    assert item.lecture_number == 2
     assert item.teacher_id == teacher.id
     assert item.status == "classified"
     assert "1 updated" in _answer_text(message)
@@ -347,7 +350,8 @@ async def test_refreshcaptions_apply_handles_partial_forward_failures(
 
     await session.refresh(first)
     await session.refresh(second)
-    assert first.raw_caption == PREFERRED_CAPTION
+    assert first.raw_caption == PREFERRED_CAPTION_WITH_NUMBER
+    assert first.lecture_number == 2
     assert second.raw_caption == STALE_CAPTION
     text = _answer_text(message)
     assert "1 updated" in text

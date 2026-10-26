@@ -15,6 +15,26 @@ from bot.services.ingestion import (
 )
 from bot.student_ui import resolve_lecture_title
 
+BATCH_8_TITLES = (
+    "Lumbosacral Plexus",
+    "Common Peroneal Nerve",
+    "Femoral Triangle",
+    "Adductor Canal",
+    "Popliteal Fossa",
+    "Posterior Compartment of Leg",
+    "Anterior Compartment of Leg",
+    "Gluteal Region Greater & Lesser Sciatic Foramen",
+    "Hip Joint",
+    "Vessels of Lower Limb - Popliteal Fossa",
+)
+
+
+def _preferred_caption(number, title):
+    return (
+        "Anatomy | Dr Mohammad Azam Sir | Lower Limb | "
+        f"{title} | L{number}"
+    )
+
 
 @pytest_asyncio.fixture
 async def pipe_numbered_catalogue(session):
@@ -51,6 +71,8 @@ async def pipe_numbered_catalogue(session):
     assert error is None
     skull, error = await add_topic(session, anatomy.id, "Skull")
     assert error is None
+    lower_limb, error = await add_topic(session, anatomy.id, "Lower Limb")
+    assert error is None
     brain, error = await add_topic(session, physiology.id, "Brain")
     assert error is None
     return SimpleNamespace(
@@ -62,6 +84,7 @@ async def pipe_numbered_catalogue(session):
         physiology_teacher=physiology_teacher,
         abdomen=abdomen,
         skull=skull,
+        lower_limb=lower_limb,
         brain=brain,
     )
 
@@ -129,6 +152,36 @@ def test_pipe_numbered_caption_parses_final_number_field():
         assert parsed.number_required is True
         assert parsed.format_error is None
         assert preferred_caption_error(caption, None) is None
+
+
+def test_preferred_five_part_batch_8_captions_parse_all_numbers():
+    for number, title in enumerate(BATCH_8_TITLES, start=1):
+        caption = _preferred_caption(number, title)
+        parsed = parse_caption(caption, None)
+        assert parsed.structured is True
+        assert parsed.caption_format == "pipe_numbered"
+        assert parsed.subject_name == "Anatomy"
+        assert parsed.teacher_name == "Dr Mohammad Azam Sir"
+        assert parsed.topic_name == "Lower Limb"
+        assert parsed.lecture_number == number
+        assert parsed.lecture_title == title
+        assert parsed.format_error is None
+        assert preferred_caption_error(caption, None) is None
+
+    spaced = parse_caption(
+        "Anatomy |  Dr Mohammad   Azam Sir | Lower   Limb | "
+        "Lumbosacral   Plexus | L1",
+        None,
+    )
+    assert spaced.teacher_name == "Dr Mohammad Azam Sir"
+    assert spaced.topic_name == "Lower Limb"
+    assert spaced.lecture_title == "Lumbosacral Plexus"
+    assert spaced.lecture_number == 1
+    assert preferred_caption_error(
+        "Anatomy |  Dr Mohammad   Azam Sir | Lower   Limb | "
+        "Lumbosacral   Plexus | L1",
+        None,
+    ) is None
 
 
 def test_pipe_numbered_caption_keeps_numbers_inside_the_title():
@@ -423,6 +476,148 @@ async def test_refresh_preview_proposes_numbers_for_existing_abdomen_batch(
         await session.refresh(item)
         assert item.lecture_number is None
         assert item.status == "classified"
+
+
+async def test_refresh_preserves_all_ten_preferred_batch_8_captions(
+    session, pipe_numbered_catalogue
+):
+    items = []
+    for message_id, (number, title) in zip(
+        range(70, 80), enumerate(BATCH_8_TITLES, start=1)
+    ):
+        caption = _preferred_caption(number, title)
+        item = await _ingest(session, message_id, caption)
+        assert item.status == "classified"
+        assert item.lecture_number == number
+        items.append((item, caption))
+
+    bot = AsyncMock()
+    bot.forward_message.return_value = SimpleNamespace(
+        message_id=900, caption="not a structured caption"
+    )
+    bot.delete_message.return_value = True
+
+    preview = _refresh_message(items[0][0].batch_id)
+    await review.refreshcaptions_cmd(preview, session, bot)
+    preview_text = _answer_text(preview)
+    assert preview_text.count("action: preserve") == 10
+    assert "proposed=L?" not in preview_text
+    for number, _ in enumerate(BATCH_8_TITLES, start=1):
+        assert f"current=L{number}" in preview_text
+        assert f"proposed=L{number}" in preview_text
+
+    for item, caption in items:
+        await session.refresh(item)
+        assert item.raw_caption == caption
+        assert item.lecture_number == int(caption.rsplit("L", 1)[1])
+
+    apply = _refresh_message(items[0][0].batch_id, apply=True)
+    await review.refreshcaptions_cmd(apply, session, bot)
+    assert "10 preserved" in _answer_text(apply)
+
+    for item, caption in items:
+        await session.refresh(item)
+        assert item.raw_caption == caption
+        assert item.lecture_number == int(caption.rsplit("L", 1)[1])
+        assert item.status == "classified"
+
+
+async def test_refresh_adds_known_number_to_unnumbered_source(
+    session, pipe_numbered_catalogue
+):
+    item = await _ingest(
+        session,
+        80,
+        "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir",
+    )
+    assert item.lecture_number == 5
+    source_caption = (
+        "Anatomy | Dr Mohammad Azam Sir | Lower Limb | Lumbosacral Plexus"
+    )
+    bot = AsyncMock()
+    bot.forward_message.return_value = SimpleNamespace(
+        message_id=900, caption=source_caption
+    )
+    bot.delete_message.return_value = True
+
+    preview = _refresh_message(item.batch_id)
+    await review.refreshcaptions_cmd(preview, session, bot)
+    preview_text = _answer_text(preview)
+    assert "action: update" in preview_text
+    assert "current=L5" in preview_text
+    assert "proposed=L5" in preview_text
+    assert "proposed=L?" not in preview_text
+
+    await session.refresh(item)
+    assert item.raw_caption == "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir"
+    assert item.lecture_number == 5
+
+    apply = _refresh_message(item.batch_id, apply=True)
+    await review.refreshcaptions_cmd(apply, session, bot)
+    apply_text = _answer_text(apply)
+    assert "1 updated" in apply_text
+    assert "[classified] L5 Lumbosacral Plexus" in apply_text
+
+    await session.refresh(item)
+    assert item.raw_caption == (
+        "Anatomy | Dr Mohammad Azam Sir | Lower Limb | "
+        "Lumbosacral Plexus | L5"
+    )
+    assert item.lecture_number == 5
+    assert item.status == "classified"
+
+
+async def test_refresh_keeps_known_number_when_source_is_not_preferred(
+    session, pipe_numbered_catalogue
+):
+    item = await _ingest(
+        session,
+        81,
+        "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir",
+    )
+    bot = AsyncMock()
+    bot.forward_message.return_value = SimpleNamespace(
+        message_id=900, caption="1. Lumbosacral Plexus atf.mp4"
+    )
+    bot.delete_message.return_value = True
+
+    preview = _refresh_message(item.batch_id)
+    await review.refreshcaptions_cmd(preview, session, bot)
+    preview_text = _answer_text(preview)
+    assert "recovered source does not use the preferred layout" in preview_text
+    assert "current=L5" in preview_text
+    assert "proposed=L5" in preview_text
+    assert "proposed=L?" not in preview_text
+
+    await session.refresh(item)
+    assert item.raw_caption == "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir"
+    assert item.lecture_number == 5
+
+
+async def test_refresh_does_not_replace_known_number_with_conflicting_source(
+    session, pipe_numbered_catalogue
+):
+    item = await _ingest(
+        session,
+        82,
+        "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir",
+    )
+    bot = AsyncMock()
+    bot.forward_message.return_value = SimpleNamespace(
+        message_id=900,
+        caption=_preferred_caption(2, "Common Peroneal Nerve"),
+    )
+    bot.delete_message.return_value = True
+
+    message = _refresh_message(item.batch_id, apply=True)
+    await review.refreshcaptions_cmd(message, session, bot)
+    text = _answer_text(message)
+    assert "source number L2 conflicts with existing L5" in text
+    assert "1 skipped" in text
+
+    await session.refresh(item)
+    assert item.raw_caption == "Anatomy | Lower Limb | L5 | Dr Mohammad Azam Sir"
+    assert item.lecture_number == 5
 
 
 async def test_refresh_does_not_apply_pipe_number_to_approved_batch(

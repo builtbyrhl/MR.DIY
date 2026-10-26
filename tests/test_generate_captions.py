@@ -15,6 +15,35 @@ from bot.db.repo import add_teacher, add_topic
 from bot.handlers import review
 from bot.services.ingestion import ingest_media, parse_filename
 
+BATCH_8_FILENAMES = (
+    ("1. Lumbosacral Plexus atf.mp4", 1, "Lumbosacral Plexus"),
+    ("2. Common Peroneal Nerve atf.mp4", 2, "Common Peroneal Nerve"),
+    ("3. Femoral Triangle atf.mp4", 3, "Femoral Triangle"),
+    ("4. Adductor Canal atf.mp4", 4, "Adductor Canal"),
+    ("5. Popliteal Fossa atf.mp4", 5, "Popliteal Fossa"),
+    (
+        "6. Posterior Compartment of Leg atf.mp4",
+        6,
+        "Posterior Compartment of Leg",
+    ),
+    (
+        "7. Anterior Compartment of Leg atf.mp4",
+        7,
+        "Anterior Compartment of Leg",
+    ),
+    (
+        "8. Gluteal Region Greater & Lesser Sciatic Foramen atf.mp4",
+        8,
+        "Gluteal Region Greater & Lesser Sciatic Foramen",
+    ),
+    ("9. Hip Joint atf.mp4", 9, "Hip Joint"),
+    (
+        "10. Vessels of Lower Limb - Popliteal Fossa.mp4",
+        10,
+        "Vessels of Lower Limb - Popliteal Fossa",
+    ),
+)
+
 
 @pytest_asyncio.fixture
 async def caption_catalogue(session):
@@ -34,12 +63,15 @@ async def caption_catalogue(session):
     assert error is None
     skull, error = await add_topic(session, anatomy.id, "Skull")
     assert error is None
+    lower_limb, error = await add_topic(session, anatomy.id, "Lower Limb")
+    assert error is None
     return SimpleNamespace(
         anatomy=anatomy,
         course=course,
         teacher=teacher,
         abdomen=abdomen,
         skull=skull,
+        lower_limb=lower_limb,
     )
 
 
@@ -57,12 +89,14 @@ async def _ingest(session, message_id, *, caption=None, file_name=None):
     return item
 
 
-async def _assign_metadata(session, item, cat):
+async def _assign_metadata(session, item, cat, topic=None):
     item, error = await set_item_course(session, item.id, cat.course.id)
     assert error is None
     item, error = await set_item_teacher(session, item.id, cat.teacher.id)
     assert error is None
-    item, error = await set_item_topics(session, item.id, [cat.abdomen.id])
+    item, error = await set_item_topics(
+        session, item.id, [(topic or cat.abdomen).id]
+    )
     assert error is None
     return item
 
@@ -102,27 +136,14 @@ def test_parse_filename_extracts_leading_numbers_and_strips_extensions():
         assert parse_filename(filename) == (number, title)
 
 
-def test_parse_filename_cleans_trailing_atf_noise():
-    for filename, number, title in (
-        ("1. Lumbosacral Plexus atf.mp4", 1, "Lumbosacral Plexus"),
-        (
-            "1.  Lumbosacral   Plexus  atf.mp4",
-            1,
-            "Lumbosacral Plexus",
-        ),
-        ("2. Common Peroneal Nerve atf.mp4", 2, "Common Peroneal Nerve"),
-        (
-            "8. Gluteal Region Greater & Lesser Sciatic Foramen atf.mp4",
-            8,
-            "Gluteal Region Greater & Lesser Sciatic Foramen",
-        ),
-        (
-            "10. Vessels of Lower Limb - Popliteal Fossa.mp4",
-            10,
-            "Vessels of Lower Limb - Popliteal Fossa",
-        ),
-    ):
+def test_parse_filename_cleans_batch_8_atf_noise():
+    for filename, number, title in BATCH_8_FILENAMES:
         assert parse_filename(filename) == (number, title)
+
+    assert parse_filename("1.  Lumbosacral   Plexus  atf.mp4") == (
+        1,
+        "Lumbosacral Plexus",
+    )
 
 
 def test_parse_filename_preserves_meaningful_atf_like_tokens():
@@ -251,38 +272,20 @@ async def test_generate_captions_preview_and_apply_use_existing_metadata(
     assert "caption generated" in apply_text
 
 
-async def test_generate_captions_cleans_filenames_and_keeps_numbers_in_number_field(
+async def test_generate_captions_cleans_all_batch_8_filenames(
     session, caption_catalogue
 ):
     cat = caption_catalogue
-    cases = (
-        ("1. Lumbosacral Plexus atf.mp4", 1, "Lumbosacral Plexus"),
-        ("2. Common Peroneal Nerve atf.mp4", 2, "Common Peroneal Nerve"),
-        (
-            "8. Gluteal Region Greater & Lesser Sciatic Foramen atf.mp4",
-            8,
-            "Gluteal Region Greater & Lesser Sciatic Foramen",
-        ),
-        (
-            "10. Vessels of Lower Limb - Popliteal Fossa.mp4",
-            10,
-            "Vessels of Lower Limb - Popliteal Fossa",
-        ),
-        ("11. ATF Receptor Signaling.mp4", 11, "ATF Receptor Signaling"),
-        (
-            "12. Catfish and ATF3 Signaling.mp4",
-            12,
-            "Catfish and ATF3 Signaling",
-        ),
-    )
     expected: dict[int, str] = {}
-    for index, (file_name, number, title) in enumerate(cases, start=60):
+    for index, (file_name, number, title) in enumerate(
+        BATCH_8_FILENAMES, start=60
+    ):
         item = await _ingest(
             session, index, caption=None, file_name=file_name
         )
-        await _assign_metadata(session, item, cat)
+        await _assign_metadata(session, item, cat, topic=cat.lower_limb)
         expected[item.id] = (
-            "Anatomy | Dr Mohammad Azam Sir | Abdomen | "
+            "Anatomy | Dr Mohammad Azam Sir | Lower Limb | "
             f"{title} | L{number}"
         )
 
@@ -303,7 +306,7 @@ async def test_generate_captions_cleans_filenames_and_keeps_numbers_in_number_fi
         stored = await session.get(UploadItem, item_id)
         assert stored.raw_caption == caption
         assert stored.lecture_number == int(caption.rsplit("L", 1)[1])
-    assert "6 updated" in _answer_text(apply)
+    assert "10 updated" in _answer_text(apply)
 
 
 async def test_generate_captions_skips_missing_metadata(

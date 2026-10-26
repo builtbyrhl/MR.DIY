@@ -121,6 +121,39 @@ class _CaptionRefreshPlan:
     current_number: Optional[int] = None
     source_number: Optional[int] = None
     proposed_number: Optional[int] = None
+    replacement_caption: Optional[str] = None
+
+
+def _source_replacement_error(
+    source_parsed,
+    known_number: Optional[int],
+) -> Optional[str]:
+    if known_number is None or source_parsed.lecture_number is None:
+        return None
+    if source_parsed.lecture_number == known_number:
+        return None
+    return (
+        f"recovered source number L{source_parsed.lecture_number} "
+        f"conflicts with existing L{known_number}"
+    )
+
+
+def _caption_with_number(caption: str, parsed, number: int) -> str:
+    if parsed.lecture_number is not None:
+        return caption.strip()
+    if parsed.caption_format == "pipe_preferred":
+        separator = " | "
+    elif parsed.caption_format == "slash_preferred":
+        separator = " / "
+    else:
+        return caption.strip()
+
+    lines = caption.strip().splitlines()
+    for index, line in enumerate(lines):
+        if line.strip():
+            lines[index] = f"{line.strip()}{separator}L{number}"
+            break
+    return "\n".join(lines)
 
 
 def _caption_refresh_plan(
@@ -134,10 +167,23 @@ def _caption_refresh_plan(
         if source_caption is not None
         else None
     )
+    file_number, _ = parse_filename(item.file_name)
     current_number = current_parsed.lecture_number
     source_number = (
-        source_parsed.lecture_number if source_parsed is not None else None
+        source_parsed.lecture_number
+        if source_parsed is not None
+        and source_parsed.structured
+        and not source_parsed.number_ambiguous
+        else None
     )
+    known_number = (
+        current_number if current_number is not None else item.lecture_number
+    )
+    proposed_number = known_number
+    if proposed_number is None:
+        proposed_number = (
+            source_number if source_number is not None else file_number
+        )
 
     if item.status == "skipped":
         return _CaptionRefreshPlan(
@@ -148,6 +194,7 @@ def _caption_refresh_plan(
             source_error,
             current_number=current_number,
             source_number=source_number,
+            proposed_number=proposed_number,
         )
     if (
         item.status in CAPTION_EDIT_BLOCKED_STATUSES
@@ -161,6 +208,7 @@ def _caption_refresh_plan(
             source_error,
             current_number=current_number,
             source_number=source_number,
+            proposed_number=proposed_number,
         )
 
     current_error = preferred_caption_error(item.raw_caption, item.file_name)
@@ -174,6 +222,7 @@ def _caption_refresh_plan(
             current_number is None
             and source_valid
             and source_number is not None
+            and _source_replacement_error(source_parsed, known_number) is None
         ):
             return _CaptionRefreshPlan(
                 item,
@@ -183,7 +232,8 @@ def _caption_refresh_plan(
                 source_error,
                 current_number=current_number,
                 source_number=source_number,
-                proposed_number=source_number,
+                proposed_number=proposed_number,
+                replacement_caption=source_caption,
             )
         if item.status == "classified" and (
             current_number is None
@@ -197,11 +247,7 @@ def _caption_refresh_plan(
                 source_error,
                 current_number=current_number,
                 source_number=source_number,
-                proposed_number=(
-                    current_number
-                    if current_number is not None
-                    else item.lecture_number
-                ),
+                proposed_number=proposed_number,
             )
         return _CaptionRefreshPlan(
             item,
@@ -211,14 +257,29 @@ def _caption_refresh_plan(
             source_error,
             current_number=current_number,
             source_number=source_number,
-            proposed_number=(
-                current_number
-                if current_number is not None
-                else item.lecture_number
-            ),
+            proposed_number=proposed_number,
         )
 
     if source_valid:
+        replacement_error = _source_replacement_error(
+            source_parsed, known_number
+        )
+        if replacement_error is not None:
+            return _CaptionRefreshPlan(
+                item,
+                "skip",
+                replacement_error,
+                source_caption,
+                source_error,
+                current_number=current_number,
+                source_number=source_number,
+                proposed_number=proposed_number,
+            )
+        replacement_caption = source_caption
+        if source_number is None and known_number is not None:
+            replacement_caption = _caption_with_number(
+                source_caption, source_parsed, known_number
+            )
         return _CaptionRefreshPlan(
             item,
             "update",
@@ -227,7 +288,8 @@ def _caption_refresh_plan(
             source_error,
             current_number=current_number,
             source_number=source_number,
-            proposed_number=source_number,
+            proposed_number=proposed_number,
+            replacement_caption=replacement_caption,
         )
 
     if source_caption is None:
@@ -242,6 +304,7 @@ def _caption_refresh_plan(
             source_error,
             current_number=current_number,
             source_number=source_number,
+            proposed_number=proposed_number,
         )
     return _CaptionRefreshPlan(
         item,
@@ -251,6 +314,7 @@ def _caption_refresh_plan(
         source_error,
         current_number=current_number,
         source_number=source_number,
+        proposed_number=proposed_number,
     )
 
 
@@ -800,7 +864,7 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
                     session,
                     source_chat_id=item.source_chat_id,
                     source_message_id=item.source_message_id,
-                    caption=plan.source_caption,
+                    caption=plan.replacement_caption or plan.source_caption,
                 )
             else:
                 refreshed, outcome = await reclassify_item_caption(

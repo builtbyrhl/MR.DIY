@@ -13,6 +13,8 @@ from bot.db.models import UploadItem
 from bot.handlers import review
 from bot.services.ingestion import ingest_media
 from bot.services.publishing import (
+    CAPTION_LIMIT,
+    _build_caption,
     publish_batch,
     publish_item,
     reconcile_publish_state,
@@ -52,6 +54,97 @@ async def _ingest(
 async def _approve(session, item):
     ok, text = await approve_batch(session, item.batch_id, 123)
     assert ok is True, text
+
+
+def _caption_item(*, raw_caption=None, title=None, file_name=None):
+    return UploadItem(
+        batch_id=1,
+        source_chat_id=-1001,
+        source_message_id=1,
+        media_type="video",
+        file_name=file_name,
+        raw_caption=raw_caption,
+        title=title,
+    )
+
+
+def test_build_caption_uses_valid_numbered_pipe_caption():
+    caption = "Anatomy | Dr A | Thorax | Thoracic wall | L1"
+
+    result = _build_caption(
+        _caption_item(raw_caption=caption, title="Thoracic wall")
+    )
+
+    assert result == caption
+
+
+def test_build_caption_uses_valid_numbered_slash_caption():
+    caption = "Anatomy / Dr A / Thorax / Thoracic wall / L1"
+
+    result = _build_caption(
+        _caption_item(raw_caption=caption, title="Thoracic wall")
+    )
+
+    assert result == caption
+
+
+def test_build_caption_falls_back_to_title_for_legacy_or_unstructured():
+    for caption in (
+        "Anatomy A Lecture 1",
+        "Anatomy / Dr A / Lecture 1 / Thorax",
+    ):
+        result = _build_caption(
+            _caption_item(raw_caption=caption, title="Legacy title")
+        )
+
+        assert result == "Legacy title"
+
+
+def test_build_caption_falls_back_to_title_for_multiline_caption():
+    caption = (
+        "Anatomy | Dr A | Thorax | Thoracic wall | L1\n"
+        "extra stale caption text"
+    )
+
+    result = _build_caption(
+        _caption_item(raw_caption=caption, title="Thoracic wall")
+    )
+
+    assert result == "Thoracic wall"
+
+
+def test_build_caption_handles_empty_captions():
+    assert _build_caption(_caption_item()) is None
+    assert _build_caption(_caption_item(raw_caption="", title="")) is None
+    assert (
+        _build_caption(_caption_item(raw_caption="", title="Title only"))
+        == "Title only"
+    )
+
+
+def test_build_caption_keeps_numbered_caption_at_length_limit():
+    suffix = " | Dr A | Thorax | Thoracic wall | L1"
+    caption = "A" * (CAPTION_LIMIT - len(suffix)) + suffix
+    assert len(caption) == CAPTION_LIMIT
+
+    result = _build_caption(
+        _caption_item(raw_caption=caption, title="Thoracic wall")
+    )
+
+    assert result == caption
+
+
+def test_build_caption_preserves_length_limit_for_numbered_caption():
+    caption = f"{'A' * 1000} | Dr A | Thorax | Thoracic wall | L1"
+    assert len(caption) > CAPTION_LIMIT
+
+    result = _build_caption(
+        _caption_item(raw_caption=caption, title="Thoracic wall")
+    )
+
+    assert result == caption[: CAPTION_LIMIT - 3].rstrip() + "..."
+    assert len(result) == CAPTION_LIMIT
+    assert result.endswith("...")
 
 
 async def test_video_publishes_to_configured_forum_topic(session, seeded_course):

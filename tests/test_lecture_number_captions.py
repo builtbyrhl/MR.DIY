@@ -282,7 +282,11 @@ async def test_publishing_and_catalogue_order_follow_numeric_lecture_numbers(
     captions = [
         call.kwargs["caption"] for call in bot.send_video.await_args_list
     ]
-    assert captions == ["First", "Second", "Tenth"]
+    assert captions == [
+        "Anatomy / Dr Mohammad Azam Sir / Skull / First / L1",
+        "Anatomy / Dr Mohammad Azam Sir / Skull / Second / L2",
+        "Anatomy / Dr Mohammad Azam Sir / Skull / Tenth / L10",
+    ]
 
     lectures = await list_lectures_by_topic(
         session, cat.anatomy.id, cat.skull.id

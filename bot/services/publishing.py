@@ -22,6 +22,7 @@ from bot.config import get_settings
 from bot.db.ingestion_repo import get_batch, get_batch_items
 from bot.db.models import Course, UploadBatch, UploadItem
 from bot.services.catalog import project_upload_to_lecture
+from bot.services.ingestion import parse_caption, preferred_caption_error
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,19 @@ def _resolve_destination(course: Course) -> Optional[int | str]:
 
 
 def _build_caption(item: UploadItem) -> Optional[str]:
-    text = (item.title or item.raw_caption or "").strip()
+    raw = (item.raw_caption or "").strip()
+    raw_lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    text = ""
+    if len(raw_lines) == 1:
+        candidate = raw_lines[0]
+        parsed = parse_caption(candidate, item.file_name)
+        if (
+            preferred_caption_error(candidate, item.file_name) is None
+            and parsed.caption_format in {"pipe_numbered", "slash_numbered"}
+        ):
+            text = candidate
+    if not text:
+        text = (item.title or raw or "").strip()
     if not text:
         return None
     if len(text) > CAPTION_LIMIT:

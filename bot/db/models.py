@@ -318,7 +318,8 @@ class UploadBatch(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_chat_id: Mapped[int] = mapped_column(BigInteger)
     batch_date: Mapped[date] = mapped_column(Date)
-    status: Mapped[str] = mapped_column(String(32), default="open")  # open/approved
+    name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="open")  # open/approved/collecting/collection_finished
     approved_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

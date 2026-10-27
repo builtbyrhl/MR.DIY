@@ -75,6 +75,59 @@ async def get_or_create_batch(session: AsyncSession, source_chat_id: int, batch_
         return existing.scalar_one()
 
 
+async def create_named_batch(session: AsyncSession, source_chat_id: int, batch_date: date, name: str) -> UploadBatch:
+    batch = UploadBatch(source_chat_id=source_chat_id, batch_date=batch_date, status="open", name=name.strip() or None)
+    session.add(batch)
+    await session.commit()
+    await session.refresh(batch)
+    return batch
+
+
+async def get_batch_by_id(session: AsyncSession, batch_id: int) -> Optional[UploadBatch]:
+    return await session.get(UploadBatch, batch_id)
+
+
+async def get_active_collecting_batch(session: AsyncSession, source_chat_id: int) -> Optional[UploadBatch]:
+    res = await session.execute(
+        select(UploadBatch).where(
+            UploadBatch.source_chat_id == source_chat_id,
+            UploadBatch.status == "collecting",
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+async def start_collecting_batch(session: AsyncSession, batch_id: int, source_chat_id: int) -> tuple[Optional[UploadBatch], Optional[str]]:
+    batch = await session.get(UploadBatch, batch_id)
+    if not batch:
+        return None, "Batch not found."
+    if batch.source_chat_id != source_chat_id:
+        return None, "Batch belongs to a different chat."
+    if batch.status == "approved":
+        return None, "Batch is already approved."
+    if batch.status == "collecting":
+        return None, "Batch is already collecting."
+    if batch.status == "collection_finished":
+        return None, "Batch collection is already finished."
+    existing = await get_active_collecting_batch(session, source_chat_id)
+    if existing and existing.id != batch.id:
+        return None, f"Another batch is already collecting (batch #{existing.id}). Finish it first with /finishbatch."
+    batch.status = "collecting"
+    await session.commit()
+    await session.refresh(batch)
+    return batch, None
+
+
+async def finish_collecting_batch(session: AsyncSession, source_chat_id: int) -> tuple[Optional[UploadBatch], Optional[str]]:
+    batch = await get_active_collecting_batch(session, source_chat_id)
+    if not batch:
+        return None, "No batch is currently collecting."
+    batch.status = "collection_finished"
+    await session.commit()
+    await session.refresh(batch)
+    return batch, None
+
+
 async def get_batch(session: AsyncSession, batch_id: int) -> Optional[UploadBatch]:
     return await session.get(UploadBatch, batch_id)
 

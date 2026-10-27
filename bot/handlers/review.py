@@ -16,8 +16,12 @@ from aiogram.types import Message
 from bot.db.ingestion_repo import (
     approve_batch,
     assign_item,
+    create_named_batch,
+    finish_collecting_batch,
     flag_item_teacher_review,
+    get_active_collecting_batch,
     get_batch,
+    get_batch_by_id,
     get_batch_items,
     get_course,
     list_batches,
@@ -28,6 +32,7 @@ from bot.db.ingestion_repo import (
     set_item_topics,
     set_items_teacher_bulk,
     skip_item,
+    start_collecting_batch,
     upsert_course,
 )
 from bot.config import get_settings
@@ -1351,6 +1356,93 @@ async def approve_cmd(message: Message, session):
         return
     ok, text = await approve_batch(session, int(args[0]), message.from_user.id)
     await message.answer(text)
+
+
+@router.message(Command("createbatch"))
+async def createbatch_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    parts = (message.text or "").strip().split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Usage: /createbatch <name>")
+        return
+    from datetime import datetime, timezone
+    from bot import config
+
+    config.get_settings.cache_clear()
+    settings = config.get_settings()
+    try:
+        source_chat_id = int(settings.upload_inbox_chat_id)
+    except (TypeError, ValueError):
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        return
+    batch = await create_named_batch(session, source_chat_id, datetime.now(timezone.utc).date(), parts[1].strip())
+    await message.answer(f"Created batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}")
+
+
+@router.message(Command("startbatch"))
+async def startbatch_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/startbatch")
+    if not args or not args[0].isdigit():
+        await message.answer("Usage: /startbatch <batch_id>")
+        return
+    from bot import config
+
+    config.get_settings.cache_clear()
+    settings = config.get_settings()
+    try:
+        source_chat_id = int(settings.upload_inbox_chat_id)
+    except (TypeError, ValueError):
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        return
+    batch, error = await start_collecting_batch(session, int(args[0]), source_chat_id)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(f"Started collecting into batch #{batch.id} ({batch.name or 'unnamed'}).")
+
+
+@router.message(Command("finishbatch"))
+async def finishbatch_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    from bot import config
+
+    config.get_settings.cache_clear()
+    settings = config.get_settings()
+    try:
+        source_chat_id = int(settings.upload_inbox_chat_id)
+    except (TypeError, ValueError):
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        return
+    batch, error = await finish_collecting_batch(session, source_chat_id)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(f"Finished collection for batch #{batch.id} ({batch.name or 'unnamed'}). No items were approved or published.")
+
+
+@router.message(Command("activebatch"))
+async def activebatch_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    from bot import config
+
+    config.get_settings.cache_clear()
+    settings = config.get_settings()
+    try:
+        source_chat_id = int(settings.upload_inbox_chat_id)
+    except (TypeError, ValueError):
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        return
+    batch = await get_active_collecting_batch(session, source_chat_id)
+    if not batch:
+        await message.answer("No batch is currently collecting.")
+        return
+    items = await get_batch_items(session, batch.id)
+    await message.answer(f"Active collecting batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}, items={len(items)}.")
 
 
 @router.message(Command("publish"))

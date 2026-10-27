@@ -113,6 +113,9 @@ FILENAME_LEADING_NUMBER = re.compile(
     r"(?:\s*[.)\-:#_]\s*|\s+|$)",
     re.IGNORECASE,
 )
+FILENAME_LEADING_ORDINAL = re.compile(
+    r"^(\d{1,2})(st|nd|rd|th)\b", re.IGNORECASE
+)
 FILENAME_TRIM_CHARS = " \t-—–:|,;._"
 FILENAME_NOISE_TOKENS = frozenset({"atf"})
 
@@ -151,7 +154,8 @@ def parse_filename(file_name: Optional[str]) -> tuple[Optional[int], Optional[st
     normalized, and a recognized standalone trailing noise token is dropped.
     Only a number at the very start of the filename is treated as a lecture
     number. Titles that start with another number are considered ambiguous and
-    are not used automatically.
+    are not used automatically, unless they begin with an ordinal matching the
+    leading lecture number.
     """
     if not file_name:
         return None, None
@@ -173,7 +177,21 @@ def parse_filename(file_name: Optional[str]) -> tuple[Optional[int], Optional[st
         if not title:
             return number, None
         if title[0].isdigit():
-            return None, None
+            ordinal = FILENAME_LEADING_ORDINAL.match(title)
+            if ordinal is None:
+                return None, None
+            ordinal_number = int(ordinal.group(1))
+            suffix = ordinal.group(2).lower()
+            expected_suffix = (
+                "th"
+                if 10 <= ordinal_number % 100 <= 20
+                else {1: "st", 2: "nd", 3: "rd"}.get(
+                    ordinal_number % 10, "th"
+                )
+            )
+            if ordinal_number != number or suffix != expected_suffix:
+                return None, None
+            title = f"{ordinal_number}{suffix}{title[ordinal.end():]}"
         return number, title
 
     if stem[0].isdigit():
@@ -286,8 +304,19 @@ def _preferred_video_title_error(
     clean = _clean_field(title or "")
     if not clean:
         return "video title missing"
+    if re.fullmatch(r"[Ll]\s*\d{1,3}", clean):
+        return f"generic video title: {clean}"
+    leading_match = re.match(
+        r"^(?:(?:lecture|lec|class|video|part)\s*[-:#.]?\s*)?([Ll]?\s*\d{1,3})(?![0-9A-Za-z])(?:\s*[.)\-\u2013\u2014:]\s*(.*))?$",
+        clean,
+        re.IGNORECASE,
+    )
+    if leading_match:
+        remainder = _clean_field(leading_match.group(2) or "").strip(" \t---:|,;")
+        if not remainder:
+            return f"generic video title: {clean}"
     numbers, remainder = _number_and_title(clean)
-    if _looks_like_lecture_field(clean) or (numbers and remainder is None):
+    if _looks_like_lecture_field(clean) and numbers and remainder is None:
         return f"generic video title: {clean}"
     normalized = _normalized_phrase(clean)
     generic = {
@@ -1172,7 +1201,13 @@ async def ingest_media(
         return existing, False
 
     paused = await is_ingestion_paused(session)
-    batch = await get_or_create_batch(session, source_chat_id, datetime.now(timezone.utc).date())
+    from bot.db.ingestion_repo import get_active_collecting_batch
+
+    active_collecting = await get_active_collecting_batch(session, source_chat_id)
+    if active_collecting is not None:
+        batch = active_collecting
+    else:
+        batch = await get_or_create_batch(session, source_chat_id, datetime.now(timezone.utc).date())
     parsed = parse_caption(caption, file_name)
 
     item = UploadItem(

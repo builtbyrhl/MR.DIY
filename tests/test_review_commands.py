@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiogram.exceptions import TelegramBadRequest
 
-from bot.db.ingestion_repo import approve_batch, skip_item
+from bot.db.ingestion_repo import approve_batch, get_batch, skip_item
 from bot.db.models import Lecture
 from bot.db.repo import add_teacher, add_topic
 from bot.handlers import review
@@ -427,3 +427,207 @@ async def test_refreshcaptions_apply_reclassifies_valid_caption_without_source(
     text = _answer_text(message)
     assert "1 reclassified" in text
     assert "source unavailable" in text
+
+
+async def test_manual_batch_collection_flow(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+
+    create_msg = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/createbatch Embryology", answer=AsyncMock())
+    await review.createbatch_cmd(create_msg, session)
+    create_text = create_msg.answer.await_args.args[0]
+    assert "Created batch" in create_text
+    batch_id = int(create_text.split()[2].replace("#", ""))
+
+    start_msg = SimpleNamespace(from_user=SimpleNamespace(id=123), text=f"/startbatch {batch_id}", answer=AsyncMock())
+    await review.startbatch_cmd(start_msg, session)
+    assert "Started collecting" in start_msg.answer.await_args.args[0]
+
+    active_msg = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/activebatch", answer=AsyncMock())
+    await review.activebatch_cmd(active_msg, session)
+    assert "Active collecting" in active_msg.answer.await_args.args[0]
+
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=500,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="manual-batch-1",
+    )
+    assert item.batch_id == batch_id
+
+    finish_msg = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/finishbatch", answer=AsyncMock())
+    await review.finishbatch_cmd(finish_msg, session)
+    finish_text = finish_msg.answer.await_args.args[0]
+    assert "Finished collection" in finish_text
+    assert "approved or published" in finish_text.lower()
+
+    batch = await get_batch(session, batch_id)
+    assert batch.status == "collection_finished"
+    await session.refresh(item)
+    assert item.status in {"classified", "needs_review"}
+    assert item.publication_status is None
+
+
+async def test_startbatch_rejects_conflicting_active_batch(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+
+    create1 = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/createbatch Batch1", answer=AsyncMock())
+    await review.createbatch_cmd(create1, session)
+    batch1 = int(create1.answer.await_args.args[0].split()[2].replace("#", ""))
+    await review.startbatch_cmd(SimpleNamespace(from_user=SimpleNamespace(id=123), text=f"/startbatch {batch1}", answer=AsyncMock()), session)
+
+    create2 = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/createbatch Batch2", answer=AsyncMock())
+    await review.createbatch_cmd(create2, session)
+    batch2 = int(create2.answer.await_args.args[0].split()[2].replace("#", ""))
+
+    start2 = SimpleNamespace(from_user=SimpleNamespace(id=123), text=f"/startbatch {batch2}", answer=AsyncMock())
+    await review.startbatch_cmd(start2, session)
+    assert "already collecting" in start2.answer.await_args.args[0].lower()
+
+
+async def test_ingestion_falls_back_to_daily_batch_when_no_active_collection(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=501,
+        media_type="video",
+        caption="Anatomy A Lecture 2",
+        file_name=None,
+        file_unique_id="daily-fallback-1",
+    )
+    batch = await get_batch(session, item.batch_id)
+    assert batch.status == "open"
+    assert batch.name is None
+
+
+async def test_manual_batch_collection_crosses_utc_date(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+
+    create_msg = SimpleNamespace(from_user=SimpleNamespace(id=123), text="/createbatch CrossDate", answer=AsyncMock())
+    await review.createbatch_cmd(create_msg, session)
+    batch_id = int(create_msg.answer.await_args.args[0].split()[2].replace("#", ""))
+    await review.startbatch_cmd(SimpleNamespace(from_user=SimpleNamespace(id=123), text=f"/startbatch {batch_id}", answer=AsyncMock()), session)
+
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=502,
+        media_type="video",
+        caption="Anatomy A Lecture 3",
+        file_name=None,
+        file_unique_id="cross-date-1",
+    )
+    assert item.batch_id == batch_id
+
+
+async def test_non_admin_cannot_use_manual_batch_commands(session, seeded_course):
+    seeded_course
+
+    for text, cmd in (
+        ("/createbatch X", review.createbatch_cmd),
+        ("/startbatch 1", review.startbatch_cmd),
+        ("/finishbatch", review.finishbatch_cmd),
+        ("/activebatch", review.activebatch_cmd),
+    ):
+        msg = SimpleNamespace(from_user=SimpleNamespace(id=999), text=text, answer=AsyncMock())
+        await cmd(msg, session)
+        msg.answer.assert_not_awaited()
+
+
+async def test_preferred_video_title_allows_descriptive_part_titles():
+    from bot.services import ingestion
+
+    assert ingestion._preferred_video_title_error(
+        "Embryological Development of the Gut - Part 1", "Embryology", "Gut"
+    ) is None
+    assert ingestion._preferred_video_title_error(
+        "Embryological Development of the Midgut - Part 2", "Embryology", "Midgut"
+    ) is None
+    assert ingestion._preferred_video_title_error(
+        "Embryological Development of the Hindgut and Urogenital System - Part 3",
+        "Embryology",
+        "Hindgut",
+    ) is None
+
+
+async def test_preferred_video_title_still_rejects_generic():
+    from bot.services import ingestion
+
+    assert ingestion._preferred_video_title_error("Lecture 5", "Embryology", "Gut") == "generic video title: Lecture 5"
+    assert ingestion._preferred_video_title_error("Part 1", "Embryology", "Gut") == "generic video title: Part 1"
+    assert ingestion._preferred_video_title_error("L1", "Embryology", "Gut") == "generic video title: L1"
+    assert ingestion._preferred_video_title_error("Embryology", "Embryology", "Gut") == "generic video title: Embryology"
+    assert ingestion._preferred_video_title_error("Gut", "Embryology", "Gut") == "generic video title: Gut"
+
+
+async def test_descriptive_part_titles_classify_without_generic_review_reason_pipe_numbered(
+    session, seeded_course
+):
+    from bot.services.ingestion import ingest_media
+    from bot.db.ingestion_repo import get_batch
+
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=600,
+        media_type="video",
+        caption="Embryology | Dr A | Gut | Embryological Development of the Gut - Part 1 | L5",
+        file_name=None,
+        file_unique_id="descriptive-part-pipe-1",
+    )
+    await session.refresh(item)
+    batch = await get_batch(session, item.batch_id)
+    assert batch.status == "open"
+    assert "generic video title" not in (item.review_reason or "")
+    assert item.status in {"classified", "needs_review"}
+
+
+async def test_descriptive_part_titles_classify_without_generic_review_reason_slash_numbered(
+    session, seeded_course
+):
+    from bot.services.ingestion import ingest_media
+    from bot.db.ingestion_repo import get_batch
+
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=601,
+        media_type="video",
+        caption="Embryology / Dr A / Midgut / Embryological Development of the Midgut - Part 2 / L6",
+        file_name=None,
+        file_unique_id="descriptive-part-slash-1",
+    )
+    await session.refresh(item)
+    batch = await get_batch(session, item.batch_id)
+    assert batch.status == "open"
+    assert "generic video title" not in (item.review_reason or "")
+    assert item.status in {"classified", "needs_review"}
+
+
+async def test_descriptive_part_titles_classify_without_generic_review_reason_pipe_preferred(
+    session, seeded_course
+):
+    from bot.services.ingestion import ingest_media
+
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=602,
+        media_type="video",
+        caption="Embryology | Dr A | Hindgut and Urogenital System | Embryological Development of the Hindgut and Urogenital System - Part 3",
+        file_name=None,
+        file_unique_id="descriptive-part-pipe-pref-1",
+    )
+    await session.refresh(item)
+    assert "generic video title" not in (item.review_reason or "")

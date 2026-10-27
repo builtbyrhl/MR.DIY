@@ -25,6 +25,10 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("topic_review_reason", Text()),
 )
 
+_UPLOAD_BATCH_NEW_COLUMNS = (
+    ("name", String(128)),
+)
+
 _LECTURE_SOURCE_UPLOAD_INDEX = "uq_lectures_source_upload_item"
 _LECTURE_TEACHER_INDEX = "ix_lectures_subject_teacher_order"
 
@@ -77,6 +81,28 @@ def ensure_open_batch_unique_index(connection) -> None:
             f"ON {table} (source_chat_id, batch_date) WHERE status = 'open'"
         )
     )
+
+
+def ensure_upload_batch_columns(connection) -> None:
+    """Add batch metadata columns to an existing upload_batches table."""
+    inspector = inspect(connection)
+    if not inspector.has_table("upload_batches"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("upload_batches")}
+    table = connection.dialect.identifier_preparer.quote("upload_batches")
+    if_not_exists = "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
+    for name, column_type in _UPLOAD_BATCH_NEW_COLUMNS:
+        if name in existing:
+            continue
+        definition = str(
+            CreateColumn(Column(name, column_type, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
 
 
 def ensure_upload_item_columns(connection) -> None:
@@ -229,6 +255,7 @@ async def init_db():
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(ensure_upload_batch_columns)
         await conn.run_sync(ensure_upload_item_columns)
         await conn.run_sync(ensure_lecture_columns)
         await conn.run_sync(ensure_user_access_columns)

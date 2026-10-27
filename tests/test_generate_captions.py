@@ -146,6 +146,23 @@ def test_parse_filename_cleans_batch_8_atf_noise():
     )
 
 
+def test_parse_filename_accepts_matching_leading_ordinals():
+    for filename, number, title in (
+        ("2. 2Nd Week atf.mp4", 2, "2nd Week"),
+        ("3. 3Rd Week atf.mp4", 3, "3rd Week"),
+        ("1. 1St Week atf.mp4", 1, "1st Week"),
+        ("4. 4Th Week atf.mp4", 4, "4th Week"),
+        ("11. 11Th Week atf.mp4", 11, "11th Week"),
+        ("1. Gametogenesis 1St Week atf.mp4", 1, "Gametogenesis 1St Week"),
+    ):
+        assert parse_filename(filename) == (number, title)
+
+    assert parse_filename("2. 3Rd Week atf.mp4") == (None, None)
+    assert parse_filename("2. 21st Century atf.mp4") == (None, None)
+    assert parse_filename("2. 2th Week atf.mp4") == (None, None)
+    assert parse_filename("3. 3st Week atf.mp4") == (None, None)
+
+
 def test_parse_filename_preserves_meaningful_atf_like_tokens():
     for filename, number, title in (
         ("11. ATF Receptor Signaling.mp4", 11, "ATF Receptor Signaling"),
@@ -270,6 +287,50 @@ async def test_generate_captions_preview_and_apply_use_existing_metadata(
     apply_text = _answer_text(apply)
     assert "1 updated" in apply_text
     assert "caption generated" in apply_text
+
+
+async def test_generate_captions_handles_ordinal_filenames(
+    session, caption_catalogue
+):
+    cat = caption_catalogue
+    embryology, error = await add_topic(
+        session, cat.anatomy.id, "General Embryology"
+    )
+    assert error is None
+
+    expected: dict[int, tuple[str, int, str]] = {}
+    for message_id, file_name, number, title in (
+        (40, "1. Gametogenesis 1St Week atf.mp4", 1, "Gametogenesis 1St Week"),
+        (41, "2. 2Nd Week atf.mp4", 2, "2nd Week"),
+        (42, "3. 3Rd Week atf.mp4", 3, "3rd Week"),
+    ):
+        item = await _ingest(
+            session, message_id, caption=None, file_name=file_name
+        )
+        await _assign_metadata(session, item, cat, topic=embryology)
+        expected[item.id] = (
+            "Anatomy | Dr Mohammad Azam Sir | General Embryology | "
+            f"{title} | L{number}",
+            number,
+            title,
+        )
+
+    preview = _generate_message(item.batch_id)
+    await review.generatecaptions_cmd(preview, session)
+    preview_text = _answer_text(preview)
+    for caption, _, _ in expected.values():
+        assert caption in preview_text
+
+    apply = _generate_message(item.batch_id, apply=True)
+    await review.generatecaptions_cmd(apply, session)
+
+    for item_id, (caption, number, title) in expected.items():
+        stored = await session.get(UploadItem, item_id)
+        assert stored.raw_caption == caption
+        assert stored.lecture_number == number
+        assert stored.title == title
+        assert stored.status == "classified"
+    assert "3 updated" in _answer_text(apply)
 
 
 async def test_generate_captions_cleans_all_batch_8_filenames(

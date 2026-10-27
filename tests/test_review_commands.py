@@ -542,6 +542,27 @@ async def test_non_admin_cannot_use_manual_batch_commands(session, seeded_course
         msg.answer.assert_not_awaited()
 
 
+async def test_batch_command_falls_back_to_plain_text_on_bad_request(session, seeded_course):
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=700,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="batch-badreq-1",
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/batch {item.batch_id}",
+        answer=AsyncMock(side_effect=[TelegramBadRequest(None, "can't parse entities"), None]),
+    )
+    await review.batch_cmd(message, session)
+    assert message.answer.await_count == 2
+    assert message.answer.await_args_list[1].kwargs.get("parse_mode") is None
+
+
 async def test_preferred_video_title_allows_descriptive_part_titles():
     from bot.services import ingestion
 

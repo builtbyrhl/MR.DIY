@@ -95,12 +95,18 @@ async def _reply_lines(message: Message, lines: list[str]) -> None:
     for line in lines:
         candidate = f"{chunk}\n{line}" if chunk else line
         if len(candidate) > 3800:
-            await message.answer(chunk)
+            try:
+                await message.answer(chunk)
+            except TelegramBadRequest:
+                await message.answer(chunk, parse_mode=None)
             chunk = line
         else:
             chunk = candidate
     if chunk:
-        await message.answer(chunk)
+        try:
+            await message.answer(chunk)
+        except TelegramBadRequest:
+            await message.answer(chunk, parse_mode=None)
 
 
 async def _reply_plain_lines(message: Message, lines: list[str]) -> None:

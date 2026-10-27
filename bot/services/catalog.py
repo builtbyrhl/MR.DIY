@@ -73,11 +73,15 @@ async def project_upload_to_lecture(
     created = lecture is None
     if lecture is None:
         lecture = Lecture(
+            institution_id=item.institution_id or getattr(course, "institution_id", None),
             subject_id=course.subject_id,
             source_upload_item_id=item.id,
             title="",
         )
         session.add(lecture)
+    else:
+        if lecture.institution_id is None:
+            lecture.institution_id = item.institution_id or getattr(course, "institution_id", None)
 
     raw_title = (item.title or item.file_name or "").strip()
     fallback_number = (

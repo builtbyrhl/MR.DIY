@@ -75,6 +75,25 @@ async def get_or_create_batch(session: AsyncSession, source_chat_id: int, batch_
         return existing.scalar_one()
 
 
+async def get_default_institution_id(session: AsyncSession) -> Optional[int]:
+    from bot.db.models import Institution
+
+    # Check setting
+    default_setting = await get_setting(session, "default_institution_id", "")
+    if default_setting.strip():
+        try:
+            did = int(default_setting.strip())
+            res = await session.execute(select(Institution).where(Institution.id == did))
+            inst = res.scalar_one_or_none()
+            if inst:
+                return inst.id
+        except ValueError:
+            pass
+    res = await session.execute(select(Institution).order_by(Institution.id))
+    inst = res.scalars().first()
+    return inst.id if inst else None
+
+
 async def create_named_batch(session: AsyncSession, source_chat_id: int, batch_date: date, name: str) -> UploadBatch:
     batch = UploadBatch(source_chat_id=source_chat_id, batch_date=batch_date, status="open", name=name.strip() or None)
     session.add(batch)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.utils.markdown import markdown_decoration
 
@@ -26,6 +26,8 @@ from bot.db.repo import (
     subject_progress,
 )
 from bot.keyboards.inline import (
+    institution_subjects_kb,
+    institutions_kb,
     lectures_kb,
     subjects_kb,
     teacher_lectures_kb,

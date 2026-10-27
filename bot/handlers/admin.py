@@ -35,18 +35,18 @@ async def admin_panel(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "🛠 Admin commands:\n"
+        "🛠 Admin commands:\n\n"
+        "📚 Catalogue:\n"
         "/addsubject <slug>|<name>|<emoji>\n"
         "/addlecture <subject_slug>|<title>|<channel_msg_id>|[premium]\n"
-        "/reorder <subject_slug>\n"
-        "/grant <user_id> [days]\n"
-        "/stats\n\n"
-        "Student access:\n"
+        "/reorder <subject_slug>\n\n"
+        "👥 Student access:\n"
         "/access — pending requests and expiring access\n"
         "/approveuser <user_id> [days; 0 = lifetime]\n"
         "/rejectuser <user_id>\n"
-        "/revokeuser <user_id>\n\n"
-        "Upload catalogue:\n"
+        "/revokeuser <user_id>\n"
+        "/grant <user_id> [days]\n\n"
+        "📥 Upload & catalogue:\n"
         "Caption: Subject | Teacher | Topic | Video Title | L<number>\n"
         "Example: Anatomy | Dr Azam | Thorax | Thoracic wall | L1\n"
         "Also: Subject | Teacher | Topic | Video Title (no number)\n"
@@ -78,12 +78,20 @@ async def admin_panel(message: Message):
         "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"
         "/unlockpublish <item> — only if the message does not exist\n"
         "/skip <item> · /keep <item> · /retry <item>\n"
-        "/pause · /resume\n"
+        "/pause · /resume\n\n"
+        "🏛 Institutions:\n"
+        "/addinstitution <name>\n"
+        "/institutions\n"
+        "/setinstitutiondefault <institution>\n"
+        "/setinstitutionbatch <batch_id>|<institution>\n"
+        "/setinstitutionitem <item_id>|<institution>\n\n"
+        "📊 Utilities:\n"
+        "/stats\n"
         "/whereami\n\n"
-        "Admins (private chat only):\n"
+        "🔐 Admins (private chat only):\n"
         "/admins\n"
-        "/addadmin <user_id> — owner only\n"
-        "/removeadmin <user_id> — owner only",
+        "/addadmin <user_id> - owner only\n"
+        "/removeadmin <user_id> - owner only",
         parse_mode=None,
     )
 
@@ -197,6 +205,177 @@ async def grant_cmd(message: Message, session):
         return
     await grant_premium(session, uid, days)
     await message.answer(f"Granted premium to {uid} for {days} days")
+
+
+def _slugify_name(name: str) -> str:
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "institution"
+
+
+@router.message(Command("addinstitution"))
+async def addinstitution_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import Institution
+
+    text = message.text or ""
+    parts = text.replace("/addinstitution", "", 1).strip()
+    if not parts:
+        await message.answer("Usage: /addinstitution <name>")
+        return
+    name = parts.strip()
+    slug = _slugify_name(name)
+    inst = Institution(name=name, slug=slug)
+    session.add(inst)
+    try:
+        await session.commit()
+        await session.refresh(inst)
+    except IntegrityError:
+        await session.rollback()
+        await message.answer("Institution already exists.")
+        return
+    await message.answer(f"Added institution #{inst.id}: {inst.name} ({inst.slug})")
+
+
+@router.message(Command("institutions"))
+async def institutions_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import Institution
+    from sqlalchemy import select
+
+    res = await session.execute(select(Institution).order_by(Institution.id))
+    items = res.scalars().all()
+    if not items:
+        await message.answer("No institutions.")
+        return
+    lines = ["Institutions:"]
+    for inst in items:
+        lines.append(f"#{inst.id}: {inst.name} ({inst.slug})")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("setinstitutiondefault"))
+async def setinstitutiondefault_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import Institution
+    from bot.db.ingestion_repo import set_setting
+    from sqlalchemy import select
+
+    text = message.text or ""
+    arg = text.replace("/setinstitutiondefault", "", 1).strip()
+    if not arg:
+        await message.answer("Usage: /setinstitutiondefault <institution_id_or_name>")
+        return
+    res = await session.execute(select(Institution))
+    insts = res.scalars().all()
+    inst = None
+    if arg.isdigit():
+        for i in insts:
+            if i.id == int(arg):
+                inst = i
+                break
+    if inst is None:
+        arg_low = arg.lower()
+        for i in insts:
+            if i.slug.lower() == arg_low or i.name.lower() == arg_low:
+                inst = i
+                break
+    if inst is None:
+        await message.answer("Institution not found.")
+        return
+    await set_setting(session, "default_institution_id", str(inst.id))
+    await message.answer(f"Default institution set to #{inst.id}: {inst.name}")
+
+
+@router.message(Command("setinstitutionbatch"))
+async def setinstitutionbatch_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import Institution, UploadBatch
+    from sqlalchemy import select
+
+    text = message.text or ""
+    arg = text.replace("/setinstitutionbatch", "", 1).strip()
+    if "|" not in arg:
+        await message.answer("Usage: /setinstitutionbatch <batch_id>|<institution>")
+        return
+    batch_part, inst_part = [x.strip() for x in arg.split("|", 1)]
+    if not batch_part.isdigit():
+        await message.answer("Batch ID must be a number.")
+        return
+    batch = await session.get(UploadBatch, int(batch_part))
+    if not batch:
+        await message.answer("Batch not found.")
+        return
+    res = await session.execute(select(Institution))
+    insts = res.scalars().all()
+    inst = None
+    if inst_part.isdigit():
+        for i in insts:
+            if i.id == int(inst_part):
+                inst = i
+                break
+    if inst is None:
+        ip = inst_part.lower()
+        for i in insts:
+            if i.slug.lower() == ip or i.name.lower() == ip:
+                inst = i
+                break
+    if inst is None:
+        await message.answer("Institution not found.")
+        return
+    from bot.db.models import UploadItem
+    from sqlalchemy import update
+
+    await session.execute(update(UploadItem).where(UploadItem.batch_id == batch.id).values(institution_id=inst.id))
+    await session.commit()
+    await message.answer(f"Set institution for batch #{batch.id} to #{inst.id}: {inst.name}")
+
+
+@router.message(Command("setinstitutionitem"))
+async def setinstitutionitem_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import Institution, UploadItem
+    from sqlalchemy import select
+
+    text = message.text or ""
+    arg = text.replace("/setinstitutionitem", "", 1).strip()
+    if "|" not in arg:
+        await message.answer("Usage: /setinstitutionitem <item_id>|<institution>")
+        return
+    item_part, inst_part = [x.strip() for x in arg.split("|", 1)]
+    if not item_part.isdigit():
+        await message.answer("Item ID must be a number.")
+        return
+    item = await session.get(UploadItem, int(item_part))
+    if not item:
+        await message.answer("Item not found.")
+        return
+    res = await session.execute(select(Institution))
+    insts = res.scalars().all()
+    inst = None
+    if inst_part.isdigit():
+        for i in insts:
+            if i.id == int(inst_part):
+                inst = i
+                break
+    if inst is None:
+        ip = inst_part.lower()
+        for i in insts:
+            if i.slug.lower() == ip or i.name.lower() == ip:
+                inst = i
+                break
+    if inst is None:
+        await message.answer("Institution not found.")
+        return
+    item.institution_id = inst.id
+    await session.commit()
+    await message.answer(f"Set institution for item #{item.id} to #{inst.id}: {inst.name}")
 
 
 @router.message(Command("reorder"))

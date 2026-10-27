@@ -71,13 +71,25 @@ class AdminUser(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class Institution(Base):
+    __tablename__ = "institutions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128))
+    slug: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    lectures: Mapped[list["Lecture"]] = relationship(back_populates="institution")
+    courses: Mapped[list["Course"]] = relationship(back_populates="institution")
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     slug: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(128))
-    emoji: Mapped[str] = mapped_column(String(8), default="📘")
+    emoji: Mapped[str] = mapped_column(String(8), default="📚")
     order: Mapped[int] = mapped_column(Integer, default=0)
 
     lectures: Mapped[list["Lecture"]] = relationship(back_populates="subject", cascade="all, delete-orphan")
@@ -193,9 +205,13 @@ class Lecture(Base):
             "teacher_id",
             "order",
         ),
+        Index("ix_lectures_institution", "institution_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    institution_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True
+    )
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
     teacher_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("teachers.id", ondelete="SET NULL"), nullable=True
@@ -212,6 +228,7 @@ class Lecture(Base):
     order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    institution: Mapped[Optional["Institution"]] = relationship(back_populates="lectures")
     subject: Mapped["Subject"] = relationship(back_populates="lectures")
 
 
@@ -292,6 +309,9 @@ class Course(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     year: Mapped[str] = mapped_column(String(32))
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    institution_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(128))
     aliases: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated
     destination_chat_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -299,6 +319,7 @@ class Course(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     subject: Mapped["Subject"] = relationship()
+    institution: Mapped[Optional["Institution"]] = relationship(back_populates="courses")
 
 
 class UploadBatch(Base):
@@ -337,6 +358,9 @@ class UploadItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("upload_batches.id", ondelete="CASCADE"))
+    institution_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True
+    )
     source_chat_id: Mapped[int] = mapped_column(BigInteger)
     source_message_id: Mapped[int] = mapped_column(BigInteger)
     forward_from_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -370,6 +394,7 @@ class UploadItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     batch: Mapped["UploadBatch"] = relationship(back_populates="items")
+    institution: Mapped[Optional["Institution"]] = relationship()
 
 
 class SystemSetting(Base):

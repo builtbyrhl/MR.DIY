@@ -11,18 +11,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.ingestion_repo import (
-    clear_teacher_if_subject_mismatch,
-    clear_topics_if_subject_mismatch,
-    ensure_item_mutable,
-    find_duplicate_file,
-    find_lecture_number_conflict,
-    get_item_by_source,
-    get_or_create_batch,
-    get_setting,
-    is_ingestion_paused,
-    list_courses,
-    set_setting,
-)
+        clear_teacher_if_subject_mismatch,
+        clear_topics_if_subject_mismatch,
+        ensure_item_mutable,
+        find_duplicate_file,
+        find_lecture_number_conflict,
+        get_item_by_source,
+        get_or_create_batch,
+        get_setting,
+        is_ingestion_paused,
+        list_courses,
+        set_setting,
+        get_default_institution_id,
+    )
 from bot.db.models import Course, UploadItem
 from bot.db.repo import (
     find_matching_teachers,
@@ -1201,7 +1202,7 @@ async def ingest_media(
         return existing, False
 
     paused = await is_ingestion_paused(session)
-    from bot.db.ingestion_repo import get_active_collecting_batch
+    from bot.db.ingestion_repo import get_active_collecting_batch, get_default_institution_id
 
     active_collecting = await get_active_collecting_batch(session, source_chat_id)
     if active_collecting is not None:
@@ -1209,9 +1210,11 @@ async def ingest_media(
     else:
         batch = await get_or_create_batch(session, source_chat_id, datetime.now(timezone.utc).date())
     parsed = parse_caption(caption, file_name)
+    default_inst = await get_default_institution_id(session)
 
     item = UploadItem(
         batch_id=batch.id,
+        institution_id=default_inst,
         source_chat_id=source_chat_id,
         source_message_id=source_message_id,
         forward_from_chat_id=forward_from_chat_id,

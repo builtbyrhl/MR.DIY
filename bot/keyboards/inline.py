@@ -51,6 +51,55 @@ def access_review_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def institutions_kb(institutions, page: int = 0, per_page: int = 8) -> InlineKeyboardMarkup:
+    pages = total_pages(len(institutions), per_page)
+    page = clamp_page(page, len(institutions), per_page)
+    start = page * per_page
+    chunk = institutions[start:start + per_page]
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=clip(f"🏛 {inst.name}"),
+                callback_data=f"inst:{inst.id}:0",
+            )
+        ]
+        for inst in chunk
+    ]
+    rows.extend(_nav_rows("instpage", page, pages))
+    rows.append([InlineKeyboardButton(text="🔙 Home", callback_data="home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def institution_subjects_kb(
+    subjects,
+    institution_id: int,
+    page: int = 0,
+    per_page: int = 8,
+    counts: dict[int, int] | None = None,
+) -> InlineKeyboardMarkup:
+    pages = total_pages(len(subjects), per_page)
+    page = clamp_page(page, len(subjects), per_page)
+    start = page * per_page
+    chunk = subjects[start:start + per_page]
+    counts = counts or {}
+    rows = []
+    for subject in chunk:
+        label = f"{subject.emoji} {subject.name}"
+        if subject.id in counts:
+            label += f" · {counts[subject.id]}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=clip(label),
+                    callback_data=f"instsubj:{institution_id}:{subject.slug}",
+                )
+            ]
+        )
+    rows.extend(_nav_rows(f"instsubjpage:{institution_id}", page, pages))
+    rows.append([InlineKeyboardButton(text="🔙 Institutions", callback_data="institutions")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def subjects_kb(
     subjects,
     page: int = 0,
@@ -76,6 +125,7 @@ def subjects_kb(
             ]
         )
     rows.extend(_nav_rows("subjpage", page, pages))
+    rows.append([InlineKeyboardButton(text="🔙 Home", callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

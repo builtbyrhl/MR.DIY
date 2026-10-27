@@ -23,6 +23,7 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("original_caption", Text()),
     ("topic_source", String(16)),
     ("topic_review_reason", Text()),
+    ("institution_id", Integer()),
 )
 
 _UPLOAD_BATCH_NEW_COLUMNS = (
@@ -146,6 +147,19 @@ def ensure_lecture_columns(connection) -> None:
     existing = {column["name"] for column in inspector.get_columns("lectures")}
     table = connection.dialect.identifier_preparer.quote("lectures")
     if_not_exists = "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
+    if "institution_id" not in existing:
+        definition = str(
+            CreateColumn(Column("institution_id", Integer, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
+        idx = connection.dialect.identifier_preparer.quote("ix_lectures_institution")
+        connection.execute(
+            text(f"CREATE INDEX IF NOT EXISTS {idx} ON {table} (institution_id)")
+        )
     if "source_upload_item_id" not in existing:
         column = Column(
             "source_upload_item_id",
@@ -190,6 +204,56 @@ def ensure_lecture_columns(connection) -> None:
             f"ON {table} (subject_id, teacher_id, {order_column})"
         )
     )
+
+
+def ensure_institution_backfill(connection) -> None:
+    """Create default institution and backfill existing lectures/items/courses."""
+    from bot.db.models import Course, Institution, Lecture, UploadItem
+
+    inspector = inspect(connection)
+    if not inspector.has_table("institutions"):
+        return
+
+    # Create default institution if none exists
+    res = connection.execute(text("SELECT id FROM institutions ORDER BY id LIMIT 1"))
+    row = res.first()
+    if row is None:
+        connection.execute(
+            text(
+                "INSERT INTO institutions (name, slug) VALUES (:name, :slug)"
+            ),
+            {"name": "Default Institution", "slug": "default-institution"},
+        )
+        res = connection.execute(text("SELECT id FROM institutions ORDER BY id LIMIT 1"))
+        row = res.first()
+    if row is None:
+        return
+    inst_id = row[0]
+
+    # Backfill lectures
+    if inspector.has_table("lectures"):
+        existing_lect_cols = {c["name"] for c in inspector.get_columns("lectures")}
+        if "institution_id" in existing_lect_cols:
+            connection.execute(
+                text("UPDATE lectures SET institution_id = :inst_id WHERE institution_id IS NULL"),
+                {"inst_id": inst_id},
+            )
+    # Backfill courses
+    if inspector.has_table("courses"):
+        existing_course_cols = {c["name"] for c in inspector.get_columns("courses")}
+        if "institution_id" in existing_course_cols:
+            connection.execute(
+                text("UPDATE courses SET institution_id = :inst_id WHERE institution_id IS NULL"),
+                {"inst_id": inst_id},
+            )
+    # Backfill upload items
+    if inspector.has_table("upload_items"):
+        existing_item_cols = {c["name"] for c in inspector.get_columns("upload_items")}
+        if "institution_id" in existing_item_cols:
+            connection.execute(
+                text("UPDATE upload_items SET institution_id = :inst_id WHERE institution_id IS NULL"),
+                {"inst_id": inst_id},
+            )
 
 
 def ensure_user_access_columns(connection) -> None:
@@ -260,3 +324,4 @@ async def init_db():
         await conn.run_sync(ensure_lecture_columns)
         await conn.run_sync(ensure_user_access_columns)
         await conn.run_sync(ensure_open_batch_unique_index)
+        await conn.run_sync(ensure_institution_backfill)

@@ -121,11 +121,13 @@ async def run_polling():
     sync_task = None
     try:
         await on_startup(bot)
-        await bot.delete_webhook(drop_pending_updates=True)
+        # Keep pending updates: messages sent while the bot was down are
+        # delivered when polling resumes instead of being discarded.
+        await bot.delete_webhook(drop_pending_updates=False)
         cleanup_task = start_media_cleanup(bot)
         sync_task = asyncio.create_task(sync_catalogue_background())
         try:
-            await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
+            await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=False)
         except TelegramConflictError:
             logger.error(
                 "Telegram polling conflict: another instance is polling with this "

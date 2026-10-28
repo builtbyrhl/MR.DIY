@@ -23,6 +23,7 @@ from bot.db.ingestion_repo import get_batch, get_batch_items
 from bot.db.models import Course, UploadBatch, UploadItem
 from bot.services.catalog import project_upload_to_lecture
 from bot.services.ingestion import parse_caption, preferred_caption_error
+from bot.services.notifications import notify_subject_followers
 
 logger = logging.getLogger(__name__)
 
@@ -176,13 +177,15 @@ async def _claim_for_publish(
 
 
 async def _sync_student_catalog(
-    session: AsyncSession, item: UploadItem
+    session: AsyncSession, item: UploadItem, bot: Bot | None = None
 ) -> None:
     """Best-effort projection; sending already succeeded at this point."""
     item_id = item.id
     try:
-        await project_upload_to_lecture(session, item)
+        lecture, created = await project_upload_to_lecture(session, item)
         await session.commit()
+        if created and bot is not None and lecture is not None:
+            await notify_subject_followers(session, bot, lecture)
     except Exception:
         await session.rollback()
         logger.exception("Failed to project published upload #%s", item_id)
@@ -201,7 +204,7 @@ async def _publish_item(
         )
 
     if item.publication_status == PUBLISHED or item.published_message_id is not None:
-        await _sync_student_catalog(session, item)
+        await _sync_student_catalog(session, item, bot)
         return PublishResult(
             item_id=item.id,
             status=ALREADY_PUBLISHED,
@@ -262,7 +265,7 @@ async def _publish_item(
 
     if not await _claim_for_publish(session, item):
         if item.publication_status == PUBLISHED or item.published_message_id is not None:
-            await _sync_student_catalog(session, item)
+            await _sync_student_catalog(session, item, bot)
             return PublishResult(
                 item_id=item.id,
                 status=ALREADY_PUBLISHED,
@@ -334,7 +337,7 @@ async def _publish_item(
     item.published_message_id = message_id
     item.error = None
     await session.commit()
-    await _sync_student_catalog(session, item)
+    await _sync_student_catalog(session, item, bot)
     return PublishResult(
         item_id=item.id,
         status=PUBLISHED,

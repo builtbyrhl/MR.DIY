@@ -89,6 +89,7 @@ async def admin_panel(message: Message):
         "/setinstitutionitem <item_id>|<institution>\n\n"
         "📊 Utilities:\n"
         "/stats\n"
+        "/dashboard — student activity and watch stats\n"
         "/whereami\n\n"
         "🔐 Admins (private chat only):\n"
         "/admins\n"
@@ -414,6 +415,91 @@ async def stats_cmd(message: Message, session):
     u = await session.execute(select(func.count(User.id)))
     l = await session.execute(select(func.count(Lecture.id)))
     await message.answer(f"Users: {u.scalar()}\nLectures: {l.scalar()}")
+
+
+@router.message(Command("dashboard"))
+async def dashboard_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from datetime import datetime, time, timedelta
+    from sqlalchemy import func, select
+    from bot.db.models import Lecture, Progress, Subject, UploadItem, User
+
+    now = datetime.utcnow()
+    today_start = datetime.combine(now.date(), time.min)
+    week_ago = now - timedelta(days=7)
+
+    async def count(query) -> int:
+        res = await session.execute(query)
+        return int(res.scalar() or 0)
+
+    total_users = await count(select(func.count(User.id)))
+    active_today = await count(
+        select(func.count(User.id)).where(User.last_active >= today_start)
+    )
+    active_week = await count(
+        select(func.count(User.id)).where(User.last_active >= week_ago)
+    )
+    new_week = await count(
+        select(func.count(User.id)).where(User.created_at >= week_ago)
+    )
+    total_lectures = await count(select(func.count(Lecture.id)))
+    uploads_today = await count(
+        select(func.count(UploadItem.id)).where(UploadItem.created_at >= today_start)
+    )
+    watched_today = await count(
+        select(func.count(Progress.id)).where(
+            Progress.watched.is_(True), Progress.watched_at >= today_start
+        )
+    )
+
+    daily_res = await session.execute(
+        select(func.date(Progress.watched_at), func.count(Progress.id))
+        .where(Progress.watched.is_(True), Progress.watched_at >= week_ago)
+        .group_by(func.date(Progress.watched_at))
+        .order_by(func.date(Progress.watched_at))
+    )
+    daily = [(day, int(total)) for day, total in daily_res.all()]
+    watched_week = sum(total for _, total in daily)
+
+    top_res = await session.execute(
+        select(Subject.name, func.count(Progress.id))
+        .join(Lecture, Lecture.subject_id == Subject.id)
+        .join(Progress, Progress.lecture_id == Lecture.id)
+        .where(Progress.watched.is_(True))
+        .group_by(Subject.name)
+        .order_by(func.count(Progress.id).desc())
+        .limit(5)
+    )
+    top_subjects = [(name, int(total)) for name, total in top_res.all()]
+
+    lines = [
+        f"📊 Dashboard — {now.strftime('%d %b %Y')}",
+        "",
+        "👥 Students",
+        f"• Total: {total_users}",
+        f"• Active today: {active_today}",
+        f"• Active last 7 days: {active_week}",
+        f"• New last 7 days: {new_week}",
+        "",
+        "🎬 Lectures",
+        f"• Published: {total_lectures}",
+        f"• Uploads received today: {uploads_today}",
+        "",
+        "📈 Views",
+        f"• Today: {watched_today}",
+        f"• Last 7 days: {watched_week}",
+    ]
+    if daily:
+        lines.extend(f"   {day} · {total}" for day, total in daily)
+    if top_subjects:
+        lines.append("")
+        lines.append("🏆 Top subjects (all time)")
+        lines.extend(
+            f"   {i}. {name} — {total} views"
+            for i, (name, total) in enumerate(top_subjects, start=1)
+        )
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("admins"))

@@ -16,6 +16,7 @@ from bot.db.models import (
     Payment,
     Progress,
     Subject,
+    SubjectFollower,
     Teacher,
     TeacherAlias,
     Topic,
@@ -1080,6 +1081,50 @@ async def list_bookmarks(session: AsyncSession, user_id: int) -> list[Lecture]:
         .where(Bookmark.user_id == user_id).order_by(Bookmark.created_at.desc())
     )
     return list(res.scalars().all())
+
+
+# ---------- Subject following (new-lecture alerts) ----------
+async def follow_subject(session: AsyncSession, user_id: int, subject_id: int) -> bool:
+    res = await session.execute(
+        select(SubjectFollower).where(
+            SubjectFollower.user_id == user_id, SubjectFollower.subject_id == subject_id
+        )
+    )
+    if res.scalar_one_or_none() is not None:
+        return True
+    session.add(SubjectFollower(user_id=user_id, subject_id=subject_id))
+    try:
+        await session.commit()
+        return True
+    except Exception:
+        await session.rollback()
+        return False
+
+
+async def unfollow_subject(session: AsyncSession, user_id: int, subject_id: int) -> bool:
+    res = await session.execute(
+        delete(SubjectFollower).where(
+            SubjectFollower.user_id == user_id, SubjectFollower.subject_id == subject_id
+        )
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def is_following(session: AsyncSession, user_id: int, subject_id: int) -> bool:
+    res = await session.execute(
+        select(SubjectFollower.id).where(
+            SubjectFollower.user_id == user_id, SubjectFollower.subject_id == subject_id
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def list_subject_follower_ids(session: AsyncSession, subject_id: int) -> list[int]:
+    res = await session.execute(
+        select(SubjectFollower.user_id).where(SubjectFollower.subject_id == subject_id)
+    )
+    return [int(v) for v in res.scalars().all()]
 
 
 # ---------- Payments ----------

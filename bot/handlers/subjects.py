@@ -11,9 +11,11 @@ from sqlalchemy import func, select
 from bot.db.models import Institution, Lecture, Subject, Teacher
 from bot.db.repo import (
     TEACHER_UNSPECIFIED,
+    follow_subject,
     get_subject,
     get_teacher,
     get_topic,
+    is_following,
     list_lectures,
     list_lectures_by_teacher,
     list_lectures_by_teacher_topic,
@@ -25,6 +27,7 @@ from bot.db.repo import (
     list_teacher_topic_groups,
     list_watched_lecture_ids,
     subject_progress,
+    unfollow_subject,
 )
 from bot.keyboards.inline import (
     institution_subjects_kb,
@@ -156,6 +159,7 @@ async def _show_teacher_groups(cb, session, subject, page: int) -> None:
     page = _clamp_page(page, len(groups), TEACHERS_PER_PAGE)
     d, t = await subject_progress(session, cb.from_user.id, subject.id)
     has_topics = bool(topic_groups)
+    following = await is_following(session, cb.from_user.id, subject.id)
     text = _teacher_groups_text(subject, d, t, groups, has_topics)
     text += page_suffix(page, len(groups), TEACHERS_PER_PAGE)
     kb = teachers_kb(
@@ -164,6 +168,7 @@ async def _show_teacher_groups(cb, session, subject, page: int) -> None:
         page=page,
         per_page=TEACHERS_PER_PAGE,
         has_topics=has_topics,
+        following=following,
     )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
 
@@ -593,6 +598,31 @@ async def open_subject(cb: CallbackQuery, session, db_user):
         await _answer_subject_error(cb, f"Failed to open subject {slug}")
         return
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("follow:"))
+async def cb_follow_subject(cb: CallbackQuery, session, db_user):
+    try:
+        subject_raw = cb.data.split(":", 1)[1]
+        subject = await session.get(Subject, int(subject_raw))
+        if not subject:
+            await cb.answer("Not found", show_alert=True)
+            return
+        user_id = cb.from_user.id
+        if await is_following(session, user_id, subject.id):
+            await unfollow_subject(session, user_id, subject.id)
+            note = f"🔕 Alerts off for {subject.name}."
+        else:
+            await follow_subject(session, user_id, subject.id)
+            note = f"🔔 You'll get a message when new {subject.name} lectures are added."
+        await _show_teacher_groups(cb, session, subject, 0)
+        await cb.answer(note, show_alert=False)
+    except (TypeError, ValueError):
+        await cb.answer("Not found", show_alert=True)
+        return
+    except Exception:
+        await _answer_subject_error(cb, f"Failed to toggle alerts for {cb.data}")
+        return
 
 
 @router.callback_query(F.data.startswith("teachers:"))

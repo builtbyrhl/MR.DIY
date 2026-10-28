@@ -258,6 +258,16 @@ class Bookmark(Base):
     user: Mapped["User"] = relationship(back_populates="bookmarks")
 
 
+class SubjectFollower(Base):
+    __tablename__ = "subject_followers"
+    __table_args__ = (UniqueConstraint("user_id", "subject_id", name="uq_user_follow_subject"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class StudentMediaMessage(Base):
     __tablename__ = "student_media_messages"
     __table_args__ = (

@@ -165,6 +165,7 @@ def teachers_kb(
     page: int = 0,
     per_page: int = 8,
     has_topics: bool = False,
+    following: bool = False,
 ) -> InlineKeyboardMarkup:
     pages = total_pages(len(groups), per_page)
     page = clamp_page(page, len(groups), per_page)
@@ -189,6 +190,14 @@ def teachers_kb(
                 )
             ]
         )
+    alert_label = (
+        "🔕 Turn off new-lecture alerts"
+        if following
+        else "🔔 Alert me for new lectures"
+    )
+    rows.append(
+        [InlineKeyboardButton(text=alert_label, callback_data=f"follow:{subject_id}")]
+    )
     rows.append([InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -427,6 +436,9 @@ def lecture_actions_kb(
                 text="✅ Mark as watched", callback_data=f"done:{lecture_id}"
             )
         ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="🚩 Report a problem", callback_data=f"report:{lecture_id}")]
     )
     rows.append([InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)])
     return InlineKeyboardMarkup(inline_keyboard=rows)

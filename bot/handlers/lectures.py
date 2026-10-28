@@ -3,7 +3,14 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.markdown import markdown_decoration
 
 from bot.config import get_settings
@@ -18,12 +25,26 @@ from bot.db.repo import (
 )
 from bot.keyboards.inline import lecture_actions_kb
 from bot.services.access import has_library_access
+from bot.services.auth import all_admin_ids
 from bot.services.lecture_display import decorate_lecture_titles
 from bot.services.media_delivery import record_delivered_media
 from bot.student_ui import lecture_title
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+class ReportStates(StatesGroup):
+    waiting_details = State()
+
+
+REPORT_REASONS = {
+    "broken": "Video is broken / won't play",
+    "wrong": "Wrong lecture or wrong content",
+    "teacher": "Wrong teacher or subject",
+    "other": "Something else",
+}
+REPORT_DETAILS_LIMIT = 1000
 
 # track last subject for the legacy "back_subject" callback
 _last_subject: dict[int, str] = {}
@@ -298,3 +319,164 @@ async def back_subject(cb: CallbackQuery, session, db_user):
     )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await cb.answer()
+
+
+async def _send_report_alert(
+    bot, session, from_user, lecture, reason_label: str, details: str
+) -> int:
+    subject = await session.get(Subject, lecture.subject_id)
+    lines = [
+        "🚩 Lecture report",
+        f"From: {from_user.full_name} (id {from_user.id})",
+        f"Subject: {subject.name if subject else '(unknown)'}",
+        f"Lecture: {lecture_title(lecture)} (id {lecture.id})",
+        f"Reason: {reason_label}",
+    ]
+    if details:
+        lines.append(f"Details: {details}")
+    text = "\n".join(lines)[:4000]
+    delivered = 0
+    for admin_id in all_admin_ids():
+        if admin_id == from_user.id:
+            continue
+        try:
+            await bot.send_message(admin_id, text, parse_mode=None)
+            delivered += 1
+        except Exception:
+            logger.warning(
+                "Failed to deliver lecture report to admin %s", admin_id, exc_info=True
+            )
+    return delivered
+
+
+@router.callback_query(F.data.startswith("report:"))
+async def report_start(cb: CallbackQuery, session, db_user):
+    try:
+        lecture_id = int(cb.data.split(":", 1)[1])
+    except ValueError:
+        await cb.answer("Not found", show_alert=True)
+        return
+    lecture = await get_lecture(session, lecture_id)
+    if lecture is None:
+        await cb.answer("Lecture not found", show_alert=True)
+        return
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=label, callback_data=f"report2:{lecture_id}:{key}"
+            )
+        ]
+        for key, label in REPORT_REASONS.items()
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Cancel", callback_data=f"report2:{lecture_id}:cancel"
+            )
+        ]
+    )
+    await cb.message.edit_text(
+        "🚩 What's wrong with this lecture?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("report2:"))
+async def report_reason(cb: CallbackQuery, session, state: FSMContext, bot):
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        await cb.answer("Not found", show_alert=True)
+        return
+    _, lecture_raw, key = parts
+    try:
+        lecture_id = int(lecture_raw)
+    except ValueError:
+        await cb.answer("Not found", show_alert=True)
+        return
+
+    if key == "cancel":
+        await state.clear()
+        await cb.message.edit_text("Report cancelled.")
+        await cb.answer()
+        return
+
+    data = await state.get_data()
+
+    if key == "skip":
+        await state.clear()
+        reason_label = data.get("reason")
+        if data.get("lecture_id") != lecture_id or not reason_label:
+            await cb.answer("This report expired. Please start again.", show_alert=True)
+            return
+        lecture = await get_lecture(session, lecture_id)
+        if lecture is None:
+            await cb.message.edit_text("That lecture is no longer available.")
+            await cb.answer()
+            return
+        delivered = await _send_report_alert(
+            bot, session, cb.from_user, lecture, reason_label, ""
+        )
+        await cb.message.edit_text(
+            "🙏 Thanks for reporting. An admin will look into it."
+            if delivered
+            else "🙏 Thanks for reporting. No admin is reachable right now."
+        )
+        await cb.answer()
+        return
+
+    reason_label = REPORT_REASONS.get(key)
+    if reason_label is None:
+        await cb.answer("Not found", show_alert=True)
+        return
+    if await get_lecture(session, lecture_id) is None:
+        await cb.answer("Lecture not found", show_alert=True)
+        return
+
+    await state.set_state(ReportStates.waiting_details)
+    await state.update_data(lecture_id=lecture_id, reason=reason_label)
+    await cb.message.edit_text(
+        f"Reason: {reason_label}\n\n"
+        "Send a short note with any details, or tap Skip.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⏭ Skip", callback_data=f"report2:{lecture_id}:skip"
+                    )
+                ]
+            ]
+        ),
+    )
+    await cb.answer()
+
+
+@router.message(ReportStates.waiting_details)
+async def report_details(message: Message, session, state: FSMContext, bot):
+    data = await state.get_data()
+    await state.clear()
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        await message.answer("Report cancelled.")
+        return
+    if len(text) > REPORT_DETAILS_LIMIT:
+        text = text[:REPORT_DETAILS_LIMIT] + "…"
+    lecture_id = data.get("lecture_id")
+    reason_label = data.get("reason")
+    if not lecture_id or not reason_label:
+        await message.answer(
+            "This report expired. Open the lecture again and tap 🚩 Report."
+        )
+        return
+    lecture = await get_lecture(session, int(lecture_id))
+    if lecture is None:
+        await message.answer("That lecture is no longer available.")
+        return
+    delivered = await _send_report_alert(
+        bot, session, message.from_user, lecture, reason_label, text
+    )
+    await message.answer(
+        "🙏 Thanks for reporting. An admin will look into it."
+        if delivered
+        else "🙏 Thanks for reporting. No admin is reachable right now."
+    )

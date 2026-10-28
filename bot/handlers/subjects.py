@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.utils.markdown import markdown_decoration
+from sqlalchemy import func, select
 
-from bot.db.models import Subject, Teacher
+from bot.db.models import Institution, Lecture, Subject, Teacher
 from bot.db.repo import (
     TEACHER_UNSPECIFIED,
     get_subject,
@@ -423,6 +424,158 @@ async def cb_subjpage(cb: CallbackQuery, session):
         await show_subjects(cb, session, page=page)
     except Exception:
         await _answer_subject_error(cb, "Failed to change subject page")
+        return
+    await cb.answer()
+
+
+INSTITUTIONS_PER_PAGE = 8
+
+
+async def _list_institutions(session) -> list[Institution]:
+    result = await session.execute(select(Institution).order_by(Institution.name))
+    return list(result.scalars())
+
+
+async def _institution_subjects(session, institution_id: int):
+    stmt = (
+        select(Subject, func.count(Lecture.id))
+        .join(Lecture, Lecture.subject_id == Subject.id)
+        .where(Lecture.institution_id == institution_id)
+        .group_by(Subject.id)
+        .order_by(Subject.name)
+    )
+    rows = (await session.execute(stmt)).all()
+    subjects = [row[0] for row in rows]
+    counts = {row[0].id: row[1] for row in rows}
+    return subjects, counts
+
+
+def _home_only_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Home", callback_data="home")]
+        ]
+    )
+
+
+async def show_institutions(cb_or_msg, session, page: int = 0) -> None:
+    institutions = await _list_institutions(session)
+    if not institutions:
+        text = (
+            "🏛 *Browse by Institution*\n"
+            "No institutions have been added yet.\n\n"
+            "Ask an admin to run `/addinstitution <name>`."
+        )
+        kb = _home_only_kb()
+    else:
+        kb = institutions_kb(institutions, page=page)
+        text = "🏛 *Browse by Institution*\nChoose an institution to see its subjects."
+        text += page_suffix(page, len(institutions), INSTITUTIONS_PER_PAGE)
+    if hasattr(cb_or_msg, "message"):
+        await cb_or_msg.message.edit_text(
+            text, parse_mode="Markdown", reply_markup=kb
+        )
+    else:
+        await cb_or_msg.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def _show_institution_subjects(
+    cb, session, institution_id: int, page: int = 0
+) -> bool:
+    institution = await session.get(Institution, institution_id)
+    if institution is None:
+        await cb.answer("Institution not found", show_alert=True)
+        return False
+    subjects, counts = await _institution_subjects(session, institution_id)
+    if not subjects:
+        await cb.message.edit_text(
+            f"🏛 *{institution.name}*\n"
+            "No subjects with lectures in this institution yet.\n\n"
+            "Browse everything with /subjects.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔙 Institutions", callback_data="institutions"
+                        )
+                    ]
+                ]
+            ),
+        )
+        return True
+    kb = institution_subjects_kb(
+        subjects, institution_id, page=page, counts=counts
+    )
+    text = f"🏛 *{institution.name}*\nChoose a subject to start studying."
+    text += page_suffix(page, len(subjects), INSTITUTIONS_PER_PAGE)
+    await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    return True
+
+
+@router.message(F.text == "🏛 Browse by Institution")
+async def institutions_cmd(message: Message, session):
+    await show_institutions(message, session)
+
+
+@router.callback_query(F.data == "institutions")
+async def cb_institutions(cb: CallbackQuery, session):
+    try:
+        await show_institutions(cb, session)
+    except Exception:
+        await _answer_subject_error(cb, "Failed to show institution list")
+        return
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("instpage:"))
+async def cb_instpage(cb: CallbackQuery, session):
+    try:
+        page = int(cb.data.split(":")[1])
+        await show_institutions(cb, session, page=page)
+    except Exception:
+        await _answer_subject_error(cb, "Failed to change institution page")
+        return
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("inst:"))
+async def cb_inst(cb: CallbackQuery, session, db_user):
+    try:
+        _, institution_raw, page_raw = cb.data.split(":")
+        await _show_institution_subjects(
+            cb, session, int(institution_raw), int(page_raw)
+        )
+    except Exception:
+        await _answer_subject_error(cb, f"Failed to open institution {cb.data}")
+        return
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("instsubjpage:"))
+async def cb_instsubjpage(cb: CallbackQuery, session, db_user):
+    try:
+        _, institution_raw, page_raw = cb.data.split(":")
+        await _show_institution_subjects(
+            cb, session, int(institution_raw), int(page_raw)
+        )
+    except Exception:
+        await _answer_subject_error(cb, f"Failed to page institution {cb.data}")
+        return
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("instsubj:"))
+async def cb_instsubj(cb: CallbackQuery, session, db_user):
+    try:
+        _, institution_raw, slug = cb.data.split(":", 2)
+        subject = await get_subject(session, slug)
+        if subject is None:
+            await cb.answer("Subject not found", show_alert=True)
+            return
+        await _show_teacher_groups(cb, session, subject, 0)
+    except Exception:
+        await _answer_subject_error(cb, f"Failed to open institution subject {cb.data}")
         return
     await cb.answer()
 

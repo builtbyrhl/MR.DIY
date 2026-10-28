@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.mp4
+*.session
+*.session-journal
+transfer.py
+test.db
+

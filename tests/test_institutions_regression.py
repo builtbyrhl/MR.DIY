@@ -8,7 +8,7 @@ from bot.db.models import Course, Institution, Lecture, Subject, UploadBatch, Up
 
 
 @pytest.mark.asyncio
-async def test_institution_migration_backfill_idempotent(session, monkeypatch):
+async def test_institution_migration_backfill_idempotent(db, session):
     """Backfill creates default institution and is idempotent."""
     from bot.db import session as db_session
 
@@ -19,8 +19,8 @@ async def test_institution_migration_backfill_idempotent(session, monkeypatch):
     await session.execute(__import__("sqlalchemy").text("DELETE FROM institutions"))
     await session.commit()
 
-    # Use engine sync connection
-    engine = db_session.get_engine()
+    # Use the isolated test engine, never the configured production database.
+    engine, _factory = db
     async with engine.begin() as conn:
         await conn.run_sync(db_session.ensure_institution_backfill)
         await conn.run_sync(db_session.ensure_institution_backfill)  # idempotent

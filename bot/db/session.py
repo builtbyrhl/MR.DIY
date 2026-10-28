@@ -188,12 +188,27 @@ def ensure_lecture_columns(connection) -> None:
     index = connection.dialect.identifier_preparer.quote(
         _LECTURE_SOURCE_UPLOAD_INDEX
     )
-    connection.execute(
+    duplicate_source = connection.execute(
         text(
-            f"CREATE UNIQUE INDEX IF NOT EXISTS {index} "
-            f"ON {table} (source_upload_item_id)"
+            f"SELECT source_upload_item_id, COUNT(*) AS total "
+            f"FROM {table} WHERE source_upload_item_id IS NOT NULL "
+            "GROUP BY source_upload_item_id HAVING COUNT(*) > 1 LIMIT 1"
         )
-    )
+    ).first()
+    if duplicate_source is not None:
+        logger.warning(
+            "Skipping %s: duplicate lecture rows reference upload item %s. "
+            "Repair the duplicates, then restart to create the index.",
+            _LECTURE_SOURCE_UPLOAD_INDEX,
+            duplicate_source.source_upload_item_id,
+        )
+    else:
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index} "
+                f"ON {table} (source_upload_item_id)"
+            )
+        )
     teacher_index = connection.dialect.identifier_preparer.quote(
         _LECTURE_TEACHER_INDEX
     )
@@ -299,14 +314,41 @@ def ensure_user_access_columns(connection) -> None:
     )
 
 
+def _engine_options(database_url: str) -> dict:
+    """Return create_async_engine options that are safe for this database.
+
+    ``pool_pre_ping`` is deliberately disabled. With async SQLAlchemy the
+    pre-ping health check can run outside the greenlet context of the asyncpg
+    driver and raise ``MissingGreenlet`` while a pooled connection is being
+    checked. ``pool_recycle`` replaces idle connections instead, which keeps
+    stale-connection failures bounded without that code path.
+    """
+    options = {"echo": False, "pool_pre_ping": False}
+    if database_url.startswith("sqlite"):
+        return options
+    options.update(
+        {
+            "pool_recycle": 1800,
+            "pool_size": 5,
+            "max_overflow": 5,
+            "pool_timeout": 10,
+            "connect_args": {"timeout": 10},
+        }
+    )
+    return options
+
+
 def get_engine():
     global _engine
     if _engine is None:
         s = get_settings()
         try:
-            _engine = create_async_engine(s.database_url, echo=False, pool_pre_ping=False)
-        except Exception:
-            logger.exception("Failed to create database engine")
+            _engine = create_async_engine(s.database_url, **_engine_options(s.database_url))
+        except Exception as exc:
+            logger.error(
+                "Failed to create database engine (%s). Check DATABASE_URL syntax.",
+                type(exc).__name__,
+            )
             raise
     return _engine
 
@@ -318,14 +360,72 @@ def get_session_factory():
     return _session_factory
 
 
+_CONNECTION_ERROR_NAMES = {
+    "OperationalError",
+    "InterfaceError",
+    "TimeoutError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "OSError",
+}
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in _CONNECTION_ERROR_NAMES:
+        return True
+    # asyncpg and SQLAlchemy wrap connection faults in several subtypes.
+    return isinstance(exc, (OSError,)) or "connect" in name.lower()
+
+
+async def _verify_connection(engine) -> None:
+    """Fail fast with a clear message when the database is unreachable."""
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.error(
+            "Database connection check failed (%s). Verify DATABASE_URL, host, "
+            "port, and network access. Credentials are not logged.",
+            type(exc).__name__,
+        )
+        raise
+    logger.info("Database connection verified")
+
+
 async def init_db():
     from bot.db.models import Base
+
     engine = get_engine()
+    await _verify_connection(engine)
+
+    steps = (
+        ("create tables", Base.metadata.create_all),
+        ("upload batch columns", ensure_upload_batch_columns),
+        ("upload item columns", ensure_upload_item_columns),
+        ("lecture columns", ensure_lecture_columns),
+        ("user access columns", ensure_user_access_columns),
+        ("open batch unique index", ensure_open_batch_unique_index),
+        ("institution backfill", ensure_institution_backfill),
+    )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(ensure_upload_batch_columns)
-        await conn.run_sync(ensure_upload_item_columns)
-        await conn.run_sync(ensure_lecture_columns)
-        await conn.run_sync(ensure_user_access_columns)
-        await conn.run_sync(ensure_open_batch_unique_index)
-        await conn.run_sync(ensure_institution_backfill)
+        for name, step in steps:
+            try:
+                await conn.run_sync(step)
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    logger.error(
+                        "Database startup failed at migration step '%s': "
+                        "connection problem (%s).",
+                        name,
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.error(
+                        "Database startup failed at migration step '%s': "
+                        "migration error (%s).",
+                        name,
+                        type(exc).__name__,
+                    )
+                raise
+            logger.info("Database startup step complete: %s", name)

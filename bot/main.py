@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
@@ -62,51 +63,75 @@ async def on_startup(bot: Bot):
         raise
 
 
+async def _start_health_server(settings) -> web.AppRunner | None:
+    """Bind the host health port before slow startup work begins.
+
+    Hosts such as Northflank restart a pod when its health check cannot
+    connect. Starting the server first means database migrations and the
+    initial catalogue sync cannot cause a health-check restart loop.
+    """
+    if not settings.port:
+        return None
+    app = web.Application()
+
+    async def health(request):
+        return web.Response(text="ok")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, settings.host, settings.port)
+    await site.start()
+    logger.info("Health server running on %s:%s", settings.host, settings.port)
+    return runner
+
+
 async def run_polling():
     settings = get_settings()
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = build_dispatcher()
-    await on_startup(bot)
-    await bot.delete_webhook(drop_pending_updates=True)
-    cleanup_task = start_media_cleanup(bot)
-    # Keep a tiny health endpoint for hosts (e.g. Northflank) that expect a port.
-    if settings.port:
-        app = web.Application()
-        async def health(request):
-            return web.Response(text="ok")
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, settings.host, settings.port)
-        await site.start()
-        logger.info("Health server running on %s:%s", settings.host, settings.port)
+    runner = await _start_health_server(settings)
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
-    finally:
-        cleanup_task.cancel()
+        await on_startup(bot)
+        await bot.delete_webhook(drop_pending_updates=True)
+        cleanup_task = start_media_cleanup(bot)
         try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+            await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
+        except TelegramConflictError:
+            logger.error(
+                "Telegram polling conflict: another instance is polling with this "
+                "BOT_TOKEN. Stop the duplicate deployment/replica, then restart."
+            )
+            raise
+        finally:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+    finally:
+        if runner is not None:
+            await runner.cleanup()
 
 
 async def run_webhook():
     settings = get_settings()
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = build_dispatcher()
-    await on_startup(bot)
-    await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
-    cleanup_task = start_media_cleanup(bot)
+
     app = web.Application()
+
     async def handle_webhook(request):
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
             return web.Response(status=403)
         data = await request.json()
         await dp.feed_webhook_update(bot, data)
         return web.Response(text="ok")
+
     async def health(request):
         return web.Response(text="ok")
+
     app.router.add_post("/", handle_webhook)
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -114,15 +139,22 @@ async def run_webhook():
     await runner.setup()
     site = web.TCPSite(runner, settings.host, settings.port)
     await site.start()
-    logger.info("Webhook running on %s:%s", settings.host, settings.port)
+    logger.info("Webhook server listening on %s:%s", settings.host, settings.port)
+
+    cleanup_task = None
     try:
+        await on_startup(bot)
+        await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
+        cleanup_task = start_media_cleanup(bot)
         await asyncio.Event().wait()
     finally:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+        await runner.cleanup()
 
 
 def main():

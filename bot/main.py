@@ -51,16 +51,41 @@ async def on_startup(bot: Bot):
     try:
         async with get_session_factory()() as session:
             admin_ids = await load_db_admin_cache(session)
-            created = await sync_published_uploads_to_catalog(session)
-        logger.info(
-            "Admin cache loaded (%s database admins); student catalogue synced "
-            "(%s new lectures)",
-            len(admin_ids),
-            created,
-        )
     except Exception:
-        logger.exception("Failed during startup sync")
+        logger.exception("Failed to load admin cache")
         raise
+    logger.info("Admin cache loaded (%s database admins)", len(admin_ids))
+
+
+async def sync_catalogue_background() -> None:
+    """Project published uploads into the student catalogue in the background.
+
+    Runs after polling has begun so a deploy or restart does not leave the
+    bot silent while the initial sync works through historical uploads.
+    """
+    try:
+        async with get_session_factory()() as session:
+            created = await sync_published_uploads_to_catalog(session)
+        logger.info("Background catalogue sync complete (%s new lectures)", created)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "Background catalogue sync failed; lectures from earlier "
+            "publications may be missing until the next successful sync"
+        )
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning("Background task ended with an error during shutdown", exc_info=True)
 
 
 async def _start_health_server(settings) -> web.AppRunner | None:
@@ -92,10 +117,13 @@ async def run_polling():
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = build_dispatcher()
     runner = await _start_health_server(settings)
+    cleanup_task = None
+    sync_task = None
     try:
         await on_startup(bot)
         await bot.delete_webhook(drop_pending_updates=True)
         cleanup_task = start_media_cleanup(bot)
+        sync_task = asyncio.create_task(sync_catalogue_background())
         try:
             await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=True)
         except TelegramConflictError:
@@ -104,13 +132,9 @@ async def run_polling():
                 "BOT_TOKEN. Stop the duplicate deployment/replica, then restart."
             )
             raise
-        finally:
-            cleanup_task.cancel()
-            try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                pass
     finally:
+        await _cancel_task(cleanup_task)
+        await _cancel_task(sync_task)
         if runner is not None:
             await runner.cleanup()
 
@@ -142,18 +166,16 @@ async def run_webhook():
     logger.info("Webhook server listening on %s:%s", settings.host, settings.port)
 
     cleanup_task = None
+    sync_task = None
     try:
         await on_startup(bot)
         await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
         cleanup_task = start_media_cleanup(bot)
+        sync_task = asyncio.create_task(sync_catalogue_background())
         await asyncio.Event().wait()
     finally:
-        if cleanup_task is not None:
-            cleanup_task.cancel()
-            try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                pass
+        await _cancel_task(cleanup_task)
+        await _cancel_task(sync_task)
         await runner.cleanup()
 
 

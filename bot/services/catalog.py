@@ -139,12 +139,15 @@ async def sync_published_uploads_to_catalog(session: AsyncSession) -> int:
     )
     created = 0
     for item in result.scalars().all():
+        item_id = item.id
         try:
             lecture, was_created = await project_upload_to_lecture(session, item)
             await session.commit()
         except Exception:
             await session.rollback()
-            logger.exception("Failed to project upload item #%s", item.id)
+            # Log the captured id: after rollback the ORM object expires, and
+            # touching its attributes here would lazy-load outside the greenlet.
+            logger.exception("Failed to project upload item #%s", item_id)
             continue
         if lecture is not None and was_created:
             created += 1

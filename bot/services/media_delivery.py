@@ -270,6 +270,7 @@ async def process_due_deletions(
             session, now=now, limit=limit
         )
         for record in records:
+            record_id = record.id
             try:
                 if await _delete_one(bot, session, record, now=now):
                     deleted += 1
@@ -277,7 +278,7 @@ async def process_due_deletions(
                 await session.rollback()
                 logger.exception(
                     "Unexpected media cleanup failure for record #%s",
-                    record.id,
+                    record_id,
                 )
     return deleted
 

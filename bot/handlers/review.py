@@ -811,8 +811,10 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
     apply_changes = len(args) == 2
     batch = await get_batch(session, int(args[0]))
     if not batch:
-        await message.answer("Batch not found.", parse_mode=None)
+        await message.answer("Batch not found.")
         return
+    batch_id = batch.id
+    batch_id = batch.id
     if apply_changes and batch.status != "open":
         await message.answer(
             f"Batch #{batch.id} is {batch.status}; no changes were applied.",
@@ -869,6 +871,7 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
             lines.append(f"#{item.id}: skipped - {plan.reason}")
             continue
 
+        item_id = item.id
         try:
             if plan.action == "update":
                 refreshed, outcome = await update_ingested_caption(
@@ -885,12 +888,12 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
             await session.rollback()
             logger.exception(
                 "Caption refresh failed for item #%s in batch #%s",
-                item.id,
-                batch.id,
+                item_id,
+                batch_id,
             )
             failed += 1
             lines.append(
-                f"#{item.id}: failed - {_telegram_error_text(exc)}"
+                f"#{item_id}: failed - {_telegram_error_text(exc)}"
             )
             continue
 
@@ -998,6 +1001,7 @@ async def generatecaptions_cmd(message: Message, session):
             lines.append(f"#{item.id}: skipped - {plan.reason}")
             continue
 
+        item_id = item.id
         try:
             refreshed, error = await set_item_caption(
                 session, item.id, plan.generated_caption
@@ -1005,17 +1009,17 @@ async def generatecaptions_cmd(message: Message, session):
         except ApprovedBatchError as exc:
             await session.rollback()
             skipped += 1
-            lines.append(f"#{item.id}: skipped - {exc}")
+            lines.append(f"#{item_id}: skipped - {exc}")
             continue
         except Exception as exc:
             await session.rollback()
             logger.exception(
                 "Caption generation failed for item #%s in batch #%s",
-                item.id,
-                batch.id,
+                item_id,
+                batch_id,
             )
             failed += 1
-            lines.append(f"#{item.id}: failed - {exc}")
+            lines.append(f"#{item_id}: failed - {exc}")
             continue
 
         if error:
@@ -1305,9 +1309,10 @@ async def setteacherplan_cmd(message: Message, session):
             lines.append(f"#{plan.item.id}: skipped - {plan.reason}")
 
     for teacher_id, group in updates_by_teacher.items():
+        group_ids = [plan.item.id for plan in group]
         try:
             teacher, assigned, errors = await set_items_teacher_bulk(
-                session, [plan.item.id for plan in group], teacher_id
+                session, group_ids, teacher_id
             )
         except Exception:
             await session.rollback()
@@ -1315,8 +1320,8 @@ async def setteacherplan_cmd(message: Message, session):
                 "Bulk teacher assignment failed for teacher #%s", teacher_id
             )
             failed += len(group)
-            for plan in group:
-                lines.append(f"#{plan.item.id}: failed - bulk assignment error")
+            for item_id in group_ids:
+                lines.append(f"#{item_id}: failed - bulk assignment error")
             continue
 
         if errors:

@@ -221,6 +221,34 @@ def ensure_lecture_columns(connection) -> None:
     )
 
 
+def ensure_course_columns(connection) -> None:
+    """Add institution_id to an existing courses table.
+
+    Like lecture teacher_id, the column is added without a foreign key so the
+    migration works on legacy databases; the application validates institution
+    consistency instead.
+    """
+    inspector = inspect(connection)
+    if not inspector.has_table("courses"):
+        return
+    existing = {column["name"] for column in inspector.get_columns("courses")}
+    table = connection.dialect.identifier_preparer.quote("courses")
+    if_not_exists = "IF NOT EXISTS " if connection.dialect.name == "postgresql" else ""
+    if "institution_id" not in existing:
+        definition = str(
+            CreateColumn(Column("institution_id", Integer, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
+    idx = connection.dialect.identifier_preparer.quote("ix_courses_institution")
+    connection.execute(
+        text(f"CREATE INDEX IF NOT EXISTS {idx} ON {table} (institution_id)")
+    )
+
+
 def ensure_institution_backfill(connection) -> None:
     """Create default institution and backfill existing lectures/items/courses."""
     from bot.db.models import Course, Institution, Lecture, UploadItem
@@ -404,6 +432,7 @@ async def init_db():
         ("upload batch columns", ensure_upload_batch_columns),
         ("upload item columns", ensure_upload_item_columns),
         ("lecture columns", ensure_lecture_columns),
+        ("course columns", ensure_course_columns),
         ("user access columns", ensure_user_access_columns),
         ("open batch unique index", ensure_open_batch_unique_index),
         ("institution backfill", ensure_institution_backfill),

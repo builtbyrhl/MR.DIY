@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
@@ -12,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 
 from bot.keyboards.inline import browse_subjects_kb, request_access_kb
 from bot.keyboards.reply import main_menu_kb
-from bot.db.repo import is_premium, last_watched_lecture
+from bot.db.repo import active_streak, is_premium, last_watched_lecture
 from bot.services.access import (
     APPROVED,
     PENDING,
@@ -83,6 +85,9 @@ async def cmd_start(message: Message, session, db_user):
     await ensure_subjects(session)
     premium = await is_premium(db_user)
     text = WELCOME + ("\n\n💎 You have Premium access." if premium else "\n\n🆓 Free plan — upgrade for HD, notes & quizzes.")
+    streak = active_streak(db_user, datetime.utcnow().date())
+    if streak > 1:
+        text += f"\n\n🔥 {streak}-day study streak — keep it going!"
     expires = access_expires_at(db_user)
     if expires is not None:
         text += (

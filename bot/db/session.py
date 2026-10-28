@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, inspect, text
+from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Integer, String, Text, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
@@ -39,6 +39,8 @@ _USER_ACCESS_NEW_COLUMNS = (
     ("access_decided_at", DateTime()),
     ("access_decided_by", BigInteger()),
     ("access_expires_at", DateTime()),
+    ("streak", Integer()),
+    ("last_study_date", Date()),
 )
 
 _USER_ACCESS_INDEX = "ix_users_access_status"

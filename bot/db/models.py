@@ -44,6 +44,7 @@ class User(Base):
     access_decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     access_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_study_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

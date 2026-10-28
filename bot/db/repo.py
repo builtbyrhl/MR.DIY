@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select, func, update, delete, insert
@@ -948,18 +948,70 @@ async def search_lectures(session: AsyncSession, query: str, limit: int = 20) ->
 
 
 # ---------- Progress ----------
+def _bump_streak(user: User, today: date) -> None:
+    """Update a user's consecutive study-day streak.
+
+    The streak grows by one when a new study day follows the previous one,
+    resets to one after a gap, and is untouched for repeat study on the same
+    day. ``today`` is the UTC study date.
+    """
+    if user.last_study_date == today:
+        return
+    if user.last_study_date == today - timedelta(days=1):
+        user.streak = (user.streak or 0) + 1
+    else:
+        user.streak = 1
+    user.last_study_date = today
+
+
+def active_streak(user: User, today: date) -> int:
+    """The streak still alive as of ``today``.
+
+    A streak earned yesterday is still active until the day after passes
+    without a study day, at which point it is over and reports zero.
+    """
+    if user.streak:
+        if user.last_study_date in (today, today - timedelta(days=1)):
+            return user.streak
+    return 0
+
+
 async def mark_watched(session: AsyncSession, user_id: int, lecture_id: int):
     prog = await session.execute(
         select(Progress).where(Progress.user_id == user_id, Progress.lecture_id == lecture_id)
     )
     p = prog.scalar_one_or_none()
+    now = datetime.utcnow()
     if p is None:
-        p = Progress(user_id=user_id, lecture_id=lecture_id, watched=True, watched_at=datetime.utcnow())
+        p = Progress(user_id=user_id, lecture_id=lecture_id, watched=True, watched_at=now)
         session.add(p)
     else:
         p.watched = True
-        p.watched_at = datetime.utcnow()
+        p.watched_at = now
+    user = await session.get(User, user_id)
+    if user is not None:
+        _bump_streak(user, now.date())
     await session.commit()
+
+
+async def count_watched(session: AsyncSession, user_id: int) -> int:
+    res = await session.execute(
+        select(func.count(Progress.id)).where(
+            Progress.user_id == user_id, Progress.watched.is_(True)
+        )
+    )
+    return res.scalar_one() or 0
+
+
+async def count_watched_since(session: AsyncSession, user_id: int, since: datetime) -> int:
+    res = await session.execute(
+        select(func.count(Progress.id)).where(
+            Progress.user_id == user_id,
+            Progress.watched.is_(True),
+            Progress.watched_at >= since,
+        )
+    )
+    return res.scalar_one() or 0
 
 
 async def is_watched(session: AsyncSession, user_id: int, lecture_id: int) -> bool:

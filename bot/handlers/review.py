@@ -26,6 +26,7 @@ from bot.db.ingestion_repo import (
     get_course,
     list_batches,
     list_courses,
+    move_items_to_batch,
     set_item_course,
     set_item_number,
     set_item_teacher,
@@ -814,7 +815,6 @@ async def refreshcaptions_cmd(message: Message, session, bot: Bot):
         await message.answer("Batch not found.")
         return
     batch_id = batch.id
-    batch_id = batch.id
     if apply_changes and batch.status != "open":
         await message.answer(
             f"Batch #{batch.id} is {batch.status}; no changes were applied.",
@@ -1454,6 +1454,52 @@ async def activebatch_cmd(message: Message, session):
         return
     items = await get_batch_items(session, batch.id)
     await message.answer(f"Active collecting batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}, items={len(items)}.")
+
+
+async def _move_items_to_batch_reply(
+    message: Message, session, command: str, raw: str
+) -> None:
+    parts = raw.split("|")
+    if len(parts) != 2:
+        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+        return
+    ids_raw, batch_raw = (part.strip() for part in parts)
+    if not batch_raw.isdigit():
+        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+        return
+    item_ids = [int(x) for x in ids_raw.split(",") if x.strip().isdigit()]
+    if not item_ids:
+        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+        return
+    batch, moved, errors = await move_items_to_batch(session, item_ids, int(batch_raw))
+    if batch is None:
+        await message.answer("\n".join(errors) if errors else "Batch not found.")
+        return
+    if errors:
+        await message.answer(
+            f"Batch #{batch.id}: nothing moved.\n" + "\n".join(errors),
+            parse_mode=None,
+        )
+        return
+    await message.answer(
+        f"Moved {len(moved)} item(s) into batch #{batch.id} "
+        f"({batch.name or 'unnamed'}). They are not approved or published.",
+        parse_mode=None,
+    )
+
+
+@router.message(Command("moveitem"))
+async def moveitem_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    await _move_items_to_batch_reply(message, session, "/moveitem", _args_raw(message, "/moveitem"))
+
+
+@router.message(Command("moveitems"))
+async def moveitems_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    await _move_items_to_batch_reply(message, session, "/moveitems", _args_raw(message, "/moveitems"))
 
 
 @router.message(Command("publish"))

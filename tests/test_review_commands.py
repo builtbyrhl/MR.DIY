@@ -652,3 +652,153 @@ async def test_descriptive_part_titles_classify_without_generic_review_reason_pi
     )
     await session.refresh(item)
     assert "generic video title" not in (item.review_reason or "")
+
+
+async def _make_batch(session, name):
+    # A batch on a different date avoids the open-batch uniqueness clash with
+    # the daily batch that ingestion creates for chat -1001.
+    from datetime import date, timedelta
+
+    from bot.db.models import UploadBatch
+
+    batch = UploadBatch(
+        source_chat_id=-1001,
+        batch_date=date.today() - timedelta(days=1),
+        status="open",
+        name=name,
+    )
+    session.add(batch)
+    await session.commit()
+    await session.refresh(batch)
+    return batch.id
+
+
+async def test_moveitem_moves_unpublished_item(session, seeded_course):
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=800,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="moveitem-1",
+    )
+    original_batch = item.batch_id
+    new_batch = await _make_batch(session, "MovedBatch")
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitem {item.id}|{new_batch}",
+        answer=AsyncMock(),
+    )
+    await review.moveitem_cmd(msg, session)
+    assert "Moved 1 item" in msg.answer.await_args.args[0]
+
+    await session.refresh(item)
+    assert item.batch_id == new_batch
+    assert item.batch_id != original_batch
+
+
+async def test_moveitems_moves_multiple_and_is_atomic(session, seeded_course):
+    seeded_course
+    item_a, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=810,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="moveitems-a",
+    )
+    item_b, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=811,
+        media_type="video",
+        caption="Anatomy A Lecture 2",
+        file_name=None,
+        file_unique_id="moveitems-b",
+    )
+    new_batch = await _make_batch(session, "BulkBatch")
+
+    bad = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitems {item_a.id},999999|{new_batch}",
+        answer=AsyncMock(),
+    )
+    await review.moveitems_cmd(bad, session)
+    assert "nothing moved" in bad.answer.await_args.args[0]
+    assert "999999" in bad.answer.await_args.args[0]
+    await session.refresh(item_a)
+    assert item_a.batch_id != new_batch
+
+    good = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitems {item_a.id},{item_b.id}|{new_batch}",
+        answer=AsyncMock(),
+    )
+    await review.moveitems_cmd(good, session)
+    assert "Moved 2 item(s)" in good.answer.await_args.args[0]
+    await session.refresh(item_a)
+    await session.refresh(item_b)
+    assert item_a.batch_id == new_batch
+    assert item_b.batch_id == new_batch
+
+
+async def test_moveitem_rejects_published_item(session, seeded_course):
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=820,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="moveitem-published",
+    )
+    item.publication_status = "published"
+    item.published_message_id = 424242
+    await session.commit()
+    new_batch = await _make_batch(session, "PublishedBatch")
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitem {item.id}|{new_batch}",
+        answer=AsyncMock(),
+    )
+    await review.moveitem_cmd(msg, session)
+    assert "Already published" in msg.answer.await_args.args[0]
+    await session.refresh(item)
+    assert item.published_message_id == 424242
+
+
+async def test_moveitem_rejects_missing_batch_and_item(session, seeded_course):
+    seeded_course
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=830,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="moveitem-missing",
+    )
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitem {item.id}|999999",
+        answer=AsyncMock(),
+    )
+    await review.moveitem_cmd(msg, session)
+    assert "not found" in msg.answer.await_args.args[0].lower()
+
+
+async def test_non_admin_cannot_use_move_commands(session, seeded_course):
+    seeded_course
+    for text, cmd in (
+        ("/moveitem 1|2", review.moveitem_cmd),
+        ("/moveitems 1,2|3", review.moveitems_cmd),
+    ):
+        msg = SimpleNamespace(from_user=SimpleNamespace(id=999), text=text, answer=AsyncMock())
+        await cmd(msg, session)
+        msg.answer.assert_not_awaited()

@@ -531,6 +531,56 @@ async def set_items_teacher_bulk(
     return teacher, items, []
 
 
+async def move_items_to_batch(
+    session: AsyncSession, item_ids: list[int], batch_id: int
+) -> tuple[Optional[UploadBatch], list[UploadItem], list[str]]:
+    """Move already-ingested uploads into an existing batch atomically.
+
+    Only unpublished items can be moved, and each item must come from the same
+    source chat as the target batch. Every item is validated before any change,
+    so a partial list never moves half of the selection.
+    """
+    batch = await session.get(UploadBatch, batch_id)
+    if batch is None:
+        return None, [], [f"Batch #{batch_id} not found."]
+
+    items: list[UploadItem] = []
+    errors: list[str] = []
+    for item_id in item_ids:
+        item = await session.get(UploadItem, item_id)
+        if item is None:
+            errors.append(f"#{item_id}: Item not found.")
+            continue
+        if item.batch_id == batch.id:
+            errors.append(f"#{item_id}: Already in batch #{batch.id}.")
+            continue
+        if item.source_chat_id != batch.source_chat_id:
+            errors.append(f"#{item_id}: Item came from a different chat.")
+            continue
+        if (
+            item.status in {"publishing", "published"}
+            or item.publication_status in {"publishing", "published"}
+            or item.published_message_id is not None
+        ):
+            errors.append(f"#{item_id}: Already published; cannot move.")
+            continue
+        items.append(item)
+
+    if errors:
+        return batch, [], errors
+
+    for item in items:
+        item.batch_id = batch.id
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    for item in items:
+        await session.refresh(item)
+    return batch, items, []
+
+
 async def clear_topics_if_subject_mismatch(
     session: AsyncSession, item: UploadItem, subject_id: int
 ) -> bool:

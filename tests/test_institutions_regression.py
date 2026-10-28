@@ -17,6 +17,7 @@ async def test_institution_migration_backfill_idempotent(session, monkeypatch):
     await session.execute(__import__("sqlalchemy").text("DELETE FROM courses"))
     await session.execute(__import__("sqlalchemy").text("DELETE FROM upload_items"))
     await session.execute(__import__("sqlalchemy").text("DELETE FROM institutions"))
+    await session.commit()
 
     # Use engine sync connection
     engine = db_session.get_engine()

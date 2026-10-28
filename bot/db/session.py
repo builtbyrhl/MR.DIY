@@ -303,7 +303,15 @@ def get_engine():
     global _engine
     if _engine is None:
         s = get_settings()
-        _engine = create_async_engine(s.database_url, echo=False, pool_pre_ping=True)
+        try:
+            _engine = create_async_engine(
+                s.database_url,
+                echo=False,
+                pool_pre_ping=False,
+            )
+        except Exception:
+            logger.exception("Failed to create database engine")
+            raise
     return _engine
 
 

@@ -39,7 +39,7 @@ async def test_streak_starts_repeats_and_increments(session):
     await session.refresh(subject)
     lecture = await _lecture(session, subject)
 
-    today = date.today()
+    today = datetime.utcnow().date()
 
     await mark_watched(session, user.id, lecture.id)
     await session.refresh(user)

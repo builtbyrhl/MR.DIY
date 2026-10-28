@@ -31,6 +31,7 @@ class Settings:
     access_default_days: int = field(default_factory=lambda: int(os.getenv("ACCESS_DEFAULT_DAYS", "0")))
     media_retention_hours: int = field(default_factory=lambda: int(os.getenv("MEDIA_RETENTION_HOURS", "24")))
     media_cleanup_interval_seconds: int = field(default_factory=lambda: int(os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "300")))
+    reminder_hour_utc: int = field(default_factory=lambda: int(os.getenv("REMINDER_HOUR_UTC", "14")))
 
     @property
     def is_webhook(self) -> bool:

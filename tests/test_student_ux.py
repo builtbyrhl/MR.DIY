@@ -301,7 +301,7 @@ async def test_progress_empty_state_links_to_subjects(session, ux_catalogue):
     text = message.answer.await_args.args[0]
     markup = message.answer.await_args.kwargs["reply_markup"]
     assert "No published lectures yet" in text
-    assert _button_data(markup) == ["subjects"]
+    assert _button_data(markup) == ["subjects", "reminder:toggle"]
 
 
 async def test_continue_empty_state_links_to_subjects(session, ux_catalogue):

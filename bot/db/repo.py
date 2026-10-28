@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, update, delete, insert
+from sqlalchemy import select, func, update, delete, insert, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1125,6 +1125,76 @@ async def list_subject_follower_ids(session: AsyncSession, subject_id: int) -> l
         select(SubjectFollower.user_id).where(SubjectFollower.subject_id == subject_id)
     )
     return [int(v) for v in res.scalars().all()]
+
+
+# ---------- Up next suggestions ----------
+async def up_next_lectures(
+    session: AsyncSession,
+    user_id: int,
+    limit: int = 3,
+    include_premium: bool = True,
+) -> list[tuple[Subject, Lecture]]:
+    """Return the first unwatched lecture for each subject the user started."""
+    watched = select(Progress.lecture_id).where(
+        Progress.user_id == user_id, Progress.watched.is_(True)
+    )
+    started = select(Lecture.subject_id).where(Lecture.id.in_(watched))
+    stmt = (
+        select(Lecture, Subject)
+        .join(Subject, Subject.id == Lecture.subject_id)
+        .where(Lecture.subject_id.in_(started), Lecture.id.notin_(watched))
+        .order_by(Subject.order, Lecture.order, Lecture.id)
+    )
+    if not include_premium:
+        stmt = stmt.where(Lecture.is_premium.is_(False))
+    res = await session.execute(stmt)
+    picks: list[tuple[Subject, Lecture]] = []
+    seen: set[int] = set()
+    for lecture, subject in res.all():
+        if subject.id in seen:
+            continue
+        seen.add(subject.id)
+        picks.append((subject, lecture))
+        if len(picks) >= max(limit, 0):
+            break
+    return picks
+
+
+# ---------- Daily reminders ----------
+async def set_reminder_enabled(
+    session: AsyncSession, user_id: int, enabled: bool
+) -> bool:
+    res = await session.execute(
+        update(User).where(User.id == user_id).values(reminder_enabled=enabled)
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def list_reminder_recipients(
+    session: AsyncSession, today: date
+) -> list[User]:
+    res = await session.execute(
+        select(User)
+        .where(
+            User.reminder_enabled.is_(True),
+            or_(
+                User.last_reminder_date.is_(None),
+                User.last_reminder_date < today,
+            ),
+        )
+        .order_by(User.id)
+    )
+    return list(res.scalars().all())
+
+
+async def mark_reminder_sent(
+    session: AsyncSession, user_id: int, sent_on: date
+) -> None:
+    await session.execute(
+        update(User).where(User.id == user_id).values(last_reminder_date=sent_on)
+    )
+    await session.commit()
 
 
 # ---------- Payments ----------

@@ -16,6 +16,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -45,6 +46,10 @@ class User(Base):
     access_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     streak: Mapped[int] = mapped_column(Integer, default=0)
     last_study_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    reminder_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    last_reminder_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

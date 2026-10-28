@@ -656,14 +656,15 @@ async def test_descriptive_part_titles_classify_without_generic_review_reason_pi
 
 async def _make_batch(session, name):
     # A batch on a different date avoids the open-batch uniqueness clash with
-    # the daily batch that ingestion creates for chat -1001.
-    from datetime import date, timedelta
+    # the daily batch that ingestion creates for chat -1001. Ingestion dates
+    # batches with the UTC clock, so use the same clock here.
+    from datetime import datetime, timedelta
 
     from bot.db.models import UploadBatch
 
     batch = UploadBatch(
         source_chat_id=-1001,
-        batch_date=date.today() - timedelta(days=1),
+        batch_date=datetime.utcnow().date() - timedelta(days=1),
         status="open",
         name=name,
     )

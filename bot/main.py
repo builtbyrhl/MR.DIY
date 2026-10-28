@@ -41,17 +41,25 @@ def build_dispatcher() -> Dispatcher:
 
 
 async def on_startup(bot: Bot):
-    await init_db()
-    logger.info("DB initialized")
-    async with get_session_factory()() as session:
-        admin_ids = await load_db_admin_cache(session)
-        created = await sync_published_uploads_to_catalog(session)
-    logger.info(
-        "Admin cache loaded (%s database admins); student catalogue synced "
-        "(%s new lectures)",
-        len(admin_ids),
-        created,
-    )
+    try:
+        await init_db()
+        logger.info("DB initialized")
+    except Exception:
+        logger.exception("Failed during init_db")
+        raise
+    try:
+        async with get_session_factory()() as session:
+            admin_ids = await load_db_admin_cache(session)
+            created = await sync_published_uploads_to_catalog(session)
+        logger.info(
+            "Admin cache loaded (%s database admins); student catalogue synced "
+            "(%s new lectures)",
+            len(admin_ids),
+            created,
+        )
+    except Exception:
+        logger.exception("Failed during startup sync")
+        raise
 
 
 async def run_polling():

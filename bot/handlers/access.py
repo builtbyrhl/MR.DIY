@@ -176,7 +176,7 @@ async def approve_user_cmd(message: Message, session, bot):
         return
     user_id, days = _parse_approval_target(message)
     if user_id is None:
-        await message.answer("Usage: /approveuser <user_id> [days]")
+        await message.answer("Usage: /approveuser <user_id> [days]", parse_mode=None)
         return
     user = await approve_access(
         session,
@@ -210,7 +210,7 @@ async def reject_user_cmd(message: Message, session, bot):
         return
     user_id = _parse_target_id(message)
     if user_id is None:
-        await message.answer("Usage: /rejectuser <user_id>")
+        await message.answer("Usage: /rejectuser <user_id>", parse_mode=None)
         return
     user = await reject_access(session, user_id, message.from_user.id)
     if user is None:
@@ -230,7 +230,7 @@ async def revoke_user_cmd(message: Message, session, bot):
         return
     user_id = _parse_target_id(message)
     if user_id is None:
-        await message.answer("Usage: /revokeuser <user_id>")
+        await message.answer("Usage: /revokeuser <user_id>", parse_mode=None)
         return
     if is_admin(user_id):
         await message.answer("Cannot revoke access for an administrator.")

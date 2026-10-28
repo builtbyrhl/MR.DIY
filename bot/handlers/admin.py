@@ -155,7 +155,7 @@ async def add_lecture(message: Message, session):
         return
     parts = [p.strip() for p in message.text.replace("/addlecture", "", 1).strip().split("|")]
     if len(parts) < 3 or not parts[0] or not parts[1]:
-        await message.answer("Usage: /addlecture subject_slug|title|channel_msg_id|[premium]")
+        await message.answer("Usage: /addlecture subject_slug|title|channel_msg_id|[premium]", parse_mode=None)
         return
     slug, title = parts[0], parts[1]
     try:
@@ -187,13 +187,13 @@ async def grant_cmd(message: Message, session):
         return
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Usage: /grant <user_id> [days]")
+        await message.answer("Usage: /grant <user_id> [days]", parse_mode=None)
         return
     try:
         uid = int(args[1])
         days = int(args[2]) if len(args) > 2 else 365
     except ValueError:
-        await message.answer("Usage: /grant <user_id> [days]")
+        await message.answer("Usage: /grant <user_id> [days]", parse_mode=None)
         return
     if uid <= 0 or days <= 0:
         await message.answer("User ID and days must be positive numbers.")
@@ -270,7 +270,7 @@ async def setinstitutiondefault_cmd(message: Message, session):
     text = message.text or ""
     arg = text.replace("/setinstitutiondefault", "", 1).strip()
     if not arg:
-        await message.answer("Usage: /setinstitutiondefault <institution_id_or_name>")
+        await message.answer("Usage: /setinstitutiondefault <institution_id_or_name>", parse_mode=None)
         return
     res = await session.execute(select(Institution))
     insts = res.scalars().all()
@@ -303,7 +303,7 @@ async def setinstitutionbatch_cmd(message: Message, session):
     text = message.text or ""
     arg = text.replace("/setinstitutionbatch", "", 1).strip()
     if "|" not in arg:
-        await message.answer("Usage: /setinstitutionbatch <batch_id>|<institution>")
+        await message.answer("Usage: /setinstitutionbatch <batch_id>|<institution>", parse_mode=None)
         return
     batch_part, inst_part = [x.strip() for x in arg.split("|", 1)]
     if not batch_part.isdigit():
@@ -348,7 +348,7 @@ async def setinstitutionitem_cmd(message: Message, session):
     text = message.text or ""
     arg = text.replace("/setinstitutionitem", "", 1).strip()
     if "|" not in arg:
-        await message.answer("Usage: /setinstitutionitem <item_id>|<institution>")
+        await message.answer("Usage: /setinstitutionitem <item_id>|<institution>", parse_mode=None)
         return
     item_part, inst_part = [x.strip() for x in arg.split("|", 1)]
     if not item_part.isdigit():
@@ -386,7 +386,7 @@ async def reorder_cmd(message: Message, session):
         return
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Usage: /reorder <subject_slug>")
+        await message.answer("Usage: /reorder <subject_slug>", parse_mode=None)
         return
     from bot.db.repo import get_subject
     subj = await get_subject(session, args[1])
@@ -446,7 +446,7 @@ async def addadmin_cmd(message: Message, session):
         return
     args = message.text.split()
     if len(args) != 2:
-        await message.answer("Usage: /addadmin <user_id>")
+        await message.answer("Usage: /addadmin <user_id>", parse_mode=None)
         return
     try:
         user_id = int(args[1])
@@ -457,7 +457,7 @@ async def addadmin_cmd(message: Message, session):
         await message.answer("User ID must be a positive number.")
         return
     if user_id in owner_ids():
-        await message.answer(f"User {user_id} is already an owner admin.")
+        await message.answer(f"User {user_id} is already an owner admin.", parse_mode=None)
         return
     admin, error = await add_db_admin(
         session, user_id, granted_by=message.from_user.id
@@ -469,7 +469,7 @@ async def addadmin_cmd(message: Message, session):
     await message.answer(
         f"Granted administrator access to {user_id}. "
         "They must start the bot and use /admin."
-    )
+    , parse_mode=None)
 
 
 @router.message(Command("removeadmin"))
@@ -484,7 +484,7 @@ async def removeadmin_cmd(message: Message, session):
         return
     args = message.text.split()
     if len(args) != 2:
-        await message.answer("Usage: /removeadmin <user_id>")
+        await message.answer("Usage: /removeadmin <user_id>", parse_mode=None)
         return
     try:
         user_id = int(args[1])
@@ -494,7 +494,7 @@ async def removeadmin_cmd(message: Message, session):
     if is_owner(user_id):
         await message.answer(
             "Owner admins come from ADMIN_IDS and cannot be removed here."
-        )
+        , parse_mode=None)
         return
     if user_id not in db_admin_ids():
         await message.answer("User is not a database-granted admin.")
@@ -507,4 +507,4 @@ async def removeadmin_cmd(message: Message, session):
         await message.answer(error)
         return
     await load_db_admin_cache(session)
-    await message.answer(f"Removed administrator access from {user_id}.")
+    await message.answer(f"Removed administrator access from {user_id}.", parse_mode=None)

@@ -745,7 +745,7 @@ async def batch_cmd(message: Message, session):
         return
     args = _args(message, "/batch")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /batch <batch_id>")
+        await message.answer("Usage: /batch <batch_id>", parse_mode=None)
         return
     batch = await get_batch(session, int(args[0]))
     if not batch:
@@ -770,7 +770,7 @@ async def dryrun_cmd(message: Message, session):
         return
     args = _args(message, "/dryrun")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /dryrun <batch_id>")
+        await message.answer("Usage: /dryrun <batch_id>", parse_mode=None)
         return
     batch = await get_batch(session, int(args[0]))
     if not batch:
@@ -1364,7 +1364,7 @@ async def approve_cmd(message: Message, session):
         return
     args = _args(message, "/approve")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /approve <batch_id>")
+        await message.answer("Usage: /approve <batch_id>", parse_mode=None)
         return
     ok, text = await approve_batch(session, int(args[0]), message.from_user.id)
     await message.answer(text)
@@ -1386,7 +1386,7 @@ async def createbatch_cmd(message: Message, session):
     try:
         source_chat_id = int(settings.upload_inbox_chat_id)
     except (TypeError, ValueError):
-        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.", parse_mode=None)
         return
     today = datetime.now(timezone.utc).date()
     open_batch = await get_open_batch_for_date(session, source_chat_id, today)
@@ -1401,7 +1401,7 @@ async def createbatch_cmd(message: Message, session):
             f"status={batch.status}.\n"
             f"Batch #{open_batch.id} is still the automatic upload target. "
             f"Use /startbatch {batch.id} to send new uploads here."
-        )
+        , parse_mode=None)
         return
     batch = await create_named_batch(session, source_chat_id, today, parts[1].strip())
     await message.answer(f"Created batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}")
@@ -1413,7 +1413,7 @@ async def startbatch_cmd(message: Message, session):
         return
     args = _args(message, "/startbatch")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /startbatch <batch_id>")
+        await message.answer("Usage: /startbatch <batch_id>", parse_mode=None)
         return
     from bot import config
 
@@ -1422,7 +1422,7 @@ async def startbatch_cmd(message: Message, session):
     try:
         source_chat_id = int(settings.upload_inbox_chat_id)
     except (TypeError, ValueError):
-        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.", parse_mode=None)
         return
     batch, error = await start_collecting_batch(session, int(args[0]), source_chat_id)
     if error:
@@ -1442,7 +1442,7 @@ async def finishbatch_cmd(message: Message, session):
     try:
         source_chat_id = int(settings.upload_inbox_chat_id)
     except (TypeError, ValueError):
-        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.", parse_mode=None)
         return
     batch, error = await finish_collecting_batch(session, source_chat_id)
     if error:
@@ -1462,7 +1462,7 @@ async def activebatch_cmd(message: Message, session):
     try:
         source_chat_id = int(settings.upload_inbox_chat_id)
     except (TypeError, ValueError):
-        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
+        await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.", parse_mode=None)
         return
     batch = await get_active_collecting_batch(session, source_chat_id)
     if not batch:
@@ -1556,7 +1556,7 @@ async def publish_cmd(message: Message, session, bot: Bot):
         return
     args = _args(message, "/publish")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /publish <batch_id>")
+        await message.answer("Usage: /publish <batch_id>", parse_mode=None)
         return
 
     result = await publish_batch(session, bot, int(args[0]))
@@ -1580,7 +1580,7 @@ async def unlockpublish_cmd(message: Message, session):
         return
     args = _args(message, "/unlockpublish")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /unlockpublish <item_id>")
+        await message.answer("Usage: /unlockpublish <item_id>", parse_mode=None)
         return
     item, error = await unlock_publish_state(session, int(args[0]))
     if error:
@@ -1604,7 +1604,7 @@ async def reconcilepublish_cmd(message: Message, session):
         await message.answer(
             "Usage: /reconcilepublish "
             "<item_id>|<message_id>|<destination_chat_id>|<topic_id>"
-        )
+        , parse_mode=None)
         return
 
     item_raw, message_raw, destination, topic_raw = parts
@@ -1632,7 +1632,7 @@ async def reconcilepublish_cmd(message: Message, session):
     await message.answer(
         f"Item #{item.id} reconciled as published (message {item.published_message_id}). "
         "No message was sent."
-    )
+    , parse_mode=None)
 
 
 @router.message(Command("skip"))
@@ -1641,7 +1641,7 @@ async def skip_cmd(message: Message, session):
         return
     args = _args(message, "/skip")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /skip <item_id>")
+        await message.answer("Usage: /skip <item_id>", parse_mode=None)
         return
     try:
         skipped = await skip_item(session, int(args[0]))
@@ -1660,7 +1660,7 @@ async def keep_cmd(message: Message, session):
         return
     args = _args(message, "/keep")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /keep <item_id>")
+        await message.answer("Usage: /keep <item_id>", parse_mode=None)
         return
     try:
         item = await keep_item(session, int(args[0]))
@@ -1670,7 +1670,7 @@ async def keep_cmd(message: Message, session):
     if not item:
         await message.answer("Item not found.")
         return
-    await message.answer(f"Duplicate flag cleared.\n{_item_line(item)}")
+    await message.answer(f"Duplicate flag cleared.\n{_item_line(item)}", parse_mode=None)
 
 
 @router.message(Command("retry"))
@@ -1679,7 +1679,7 @@ async def retry_cmd(message: Message, session):
         return
     args = _args(message, "/retry")
     if not args or not args[0].isdigit():
-        await message.answer("Usage: /retry <item_id>")
+        await message.answer("Usage: /retry <item_id>", parse_mode=None)
         return
     try:
         item = await retry_item(session, int(args[0]))
@@ -1689,7 +1689,7 @@ async def retry_cmd(message: Message, session):
     if not item:
         await message.answer("Item not found.")
         return
-    await message.answer(f"Item reclassified.\n{_item_line(item)}")
+    await message.answer(f"Item reclassified.\n{_item_line(item)}", parse_mode=None)
 
 
 @router.message(Command("setcourse"))
@@ -1698,7 +1698,7 @@ async def setcourse_cmd(message: Message, session):
         return
     args = _args(message, "/setcourse")
     if len(args) < 2 or not all(arg.isdigit() for arg in args[:2]):
-        await message.answer("Usage: /setcourse <item_id> <course_id>")
+        await message.answer("Usage: /setcourse <item_id> <course_id>", parse_mode=None)
         return
     try:
         item, error = await set_item_course(session, int(args[0]), int(args[1]))
@@ -1708,7 +1708,7 @@ async def setcourse_cmd(message: Message, session):
     if error:
         await message.answer(error)
         return
-    await message.answer(f"Course set.\n{_item_line(item)}")
+    await message.answer(f"Course set.\n{_item_line(item)}", parse_mode=None)
 
 
 @router.message(Command("setnumber"))
@@ -1717,7 +1717,7 @@ async def setnumber_cmd(message: Message, session):
         return
     args = _args(message, "/setnumber")
     if len(args) < 2 or not all(arg.isdigit() for arg in args[:2]):
-        await message.answer("Usage: /setnumber <item_id> <lecture_number>")
+        await message.answer("Usage: /setnumber <item_id> <lecture_number>", parse_mode=None)
         return
     try:
         item, error = await set_item_number(session, int(args[0]), int(args[1]))
@@ -1727,7 +1727,7 @@ async def setnumber_cmd(message: Message, session):
     if error:
         await message.answer(error)
         return
-    await message.answer(f"Lecture number set.\n{_item_line(item)}")
+    await message.answer(f"Lecture number set.\n{_item_line(item)}", parse_mode=None)
 
 
 @router.message(Command("addteacher"))
@@ -1742,7 +1742,7 @@ async def addteacher_cmd(message: Message, session):
             "Example: /addteacher anatomy|Dr A. Sharma\n"
             "Example with aliases: /addteacher anatomy|Dr. Muhammad Azam|"
             "Dr Mohammad Azam,Mohammad Azam"
-        )
+        , parse_mode=None)
         return
     subject_slug, name = parts[0], parts[1]
     aliases = (
@@ -1754,7 +1754,7 @@ async def addteacher_cmd(message: Message, session):
     if not subject:
         await message.answer(
             f"Subject '{subject_slug}' not found. Use /subjects to see the available subjects."
-        )
+        , parse_mode=None)
         return
     teacher, error = await add_teacher(
         session, subject.id, name, aliases=aliases
@@ -1776,7 +1776,7 @@ async def teacheralias_cmd(message: Message, session):
         await message.answer(
             "Usage: /teacheralias <teacher_id>|<alias>\n"
             "Example: /teacheralias 4|Dr Mohammad Azam"
-        )
+        , parse_mode=None)
         return
     teacher_id = int(parts[0])
     alias, error = await add_teacher_alias(session, teacher_id, parts[1])
@@ -1784,7 +1784,7 @@ async def teacheralias_cmd(message: Message, session):
         await message.answer(error)
         return
     assert alias is not None
-    await message.answer(f"Added alias '{alias.name}' for teacher #{teacher_id}.")
+    await message.answer(f"Added alias '{alias.name}' for teacher #{teacher_id}.", parse_mode=None)
 
 
 @router.message(Command("removealias"))
@@ -1793,14 +1793,14 @@ async def removealias_cmd(message: Message, session):
         return
     parts = [part.strip() for part in _args_raw(message, "/removealias").split("|")]
     if len(parts) < 2 or not parts[0].isdigit() or not parts[1]:
-        await message.answer("Usage: /removealias <teacher_id>|<alias>")
+        await message.answer("Usage: /removealias <teacher_id>|<alias>", parse_mode=None)
         return
     teacher_id = int(parts[0])
     _, error = await remove_teacher_alias(session, teacher_id, parts[1])
     if error:
         await message.answer(error)
         return
-    await message.answer(f"Removed alias from teacher #{teacher_id}.")
+    await message.answer(f"Removed alias from teacher #{teacher_id}.", parse_mode=None)
 
 
 @router.message(Command("renameteacher"))
@@ -1812,7 +1812,7 @@ async def renameteacher_cmd(message: Message, session):
         await message.answer(
             "Usage: /renameteacher <teacher_id>|<new name>\n"
             "The teacher ID and all uploaded/lecture links are preserved."
-        )
+        , parse_mode=None)
         return
     teacher_id = int(parts[0])
     teacher, error = await rename_teacher(session, teacher_id, parts[1])
@@ -1829,7 +1829,7 @@ async def teachers_cmd(message: Message, session):
         return
     args = _args(message, "/teachers")
     if not args:
-        await message.answer("Usage: /teachers <subject_slug>")
+        await message.answer("Usage: /teachers <subject_slug>", parse_mode=None)
         return
     subject = await get_subject(session, args[0])
     if not subject:
@@ -1860,7 +1860,7 @@ async def setteacher_cmd(message: Message, session):
     if len(parts) < 2 or not parts[0].isdigit():
         await message.answer(
             "Usage: /setteacher <item_id>|<teacher_id|none>"
-        )
+        , parse_mode=None)
         return
     teacher_id, error = _teacher_id_arg(parts[1])
     if error:
@@ -1889,7 +1889,7 @@ async def setteacherbulk_cmd(message: Message, session):
         await message.answer(
             "Usage: /setteacherbulk <item_ids>|<teacher_id>\n"
             "Example: /setteacherbulk 7,9,8|1"
-        )
+        , parse_mode=None)
         return
 
     item_ids, error = _bulk_item_ids(parts[0])
@@ -1944,12 +1944,12 @@ async def addtopic_cmd(message: Message, session):
         await message.answer(
             "Usage: /addtopic <subject_slug>|<name>\n"
             "Example: /addtopic anatomy|Upper Limb"
-        )
+        , parse_mode=None)
         return
     subject_slug, name = parts[0], parts[1]
     subject = await get_subject(session, subject_slug)
     if not subject:
-        await message.answer(f"Subject '{subject_slug}' not found.")
+        await message.answer(f"Subject '{subject_slug}' not found.", parse_mode=None)
         return
     topic, error = await add_topic(session, subject.id, name)
     if error:
@@ -1966,7 +1966,7 @@ async def topics_cmd(message: Message, session):
         return
     args = _args(message, "/topics")
     if not args:
-        await message.answer("Usage: /topics <subject_slug>")
+        await message.answer("Usage: /topics <subject_slug>", parse_mode=None)
         return
     subject = await get_subject(session, args[0])
     if not subject:
@@ -1993,7 +1993,7 @@ async def settopic_cmd(message: Message, session):
     if len(parts) < 2:
         await message.answer(
             "Usage: /settopic <item_id[,item_id...]>|<topic_id[,topic_id...]|none>"
-        )
+        , parse_mode=None)
         return
     item_ids, error = _item_ids(parts[0])
     if error:
@@ -2030,7 +2030,7 @@ async def assign_cmd(message: Message, session):
             "Usage: /assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->\n"
             "Example: /assign 12,13|4|1,2|8\n"
             "Use - to leave a field unchanged."
-        )
+        , parse_mode=None)
         return
     item_ids, error = _item_ids(parts[0])
     if error:
@@ -2083,7 +2083,7 @@ async def assign_cmd(message: Message, session):
                 await message.answer(
                     f"Assignment failed for item #{item_id}: {error}\n"
                     "No changes were applied."
-                )
+                , parse_mode=None)
                 return
             lines.append(f"#{item_id}: assigned")
         await session.commit()
@@ -2105,7 +2105,7 @@ async def setlecturetopic_cmd(message: Message, session):
     if len(parts) < 2 or not parts[0].isdigit():
         await message.answer(
             "Usage: /setlecturetopic <lecture_id>|<topic_id[,topic_id...]|none>"
-        )
+        , parse_mode=None)
         return
     topic_raw = parts[1].lower()
     if topic_raw in {"none", "0", "-"}:
@@ -2165,7 +2165,7 @@ async def setlecturetitle_cmd(message: Message, session):
             "Usage: /setlecturetitle <lecture_id>|<title>\n"
             "This updates the student-visible title without re-uploading or "
             "changing the original caption."
-        )
+        , parse_mode=None)
         return
     lecture, error = await set_lecture_title(
         session, int(parts[0].strip()), parts[1]
@@ -2186,7 +2186,7 @@ async def setlectureteacher_cmd(message: Message, session):
     if len(parts) < 2 or not parts[0].isdigit():
         await message.answer(
             "Usage: /setlectureteacher <lecture_id>|<teacher_id|none>"
-        )
+        , parse_mode=None)
         return
     teacher_id, error = _teacher_id_arg(parts[1])
     if error:
@@ -2233,7 +2233,7 @@ async def addcourse_cmd(message: Message, session):
         await message.answer(
             "Usage: /addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]\n"
             "Example: /addcourse anatomy|Anatomy|anatomy,anat|-1001234567890|12"
-        )
+        , parse_mode=None)
         return
 
     subject_slug = parts[0]
@@ -2242,7 +2242,7 @@ async def addcourse_cmd(message: Message, session):
         await message.answer(
             f"Subject '{subject_slug}' not found. Use /subjects to see the available subjects.\n"
             "Usage: /addcourse <subject_slug>|<name>|[aliases]|[destination_chat]|[topic_id]"
-        )
+        , parse_mode=None)
         return
 
     name = parts[1] if len(parts) > 1 and parts[1] else subject.name

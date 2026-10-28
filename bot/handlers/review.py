@@ -24,6 +24,7 @@ from bot.db.ingestion_repo import (
     get_batch_by_id,
     get_batch_items,
     get_course,
+    get_open_batch_for_date,
     list_batches,
     list_courses,
     move_items_to_batch,
@@ -1387,7 +1388,22 @@ async def createbatch_cmd(message: Message, session):
     except (TypeError, ValueError):
         await message.answer("UPLOAD_INBOX_CHAT_ID is not configured.")
         return
-    batch = await create_named_batch(session, source_chat_id, datetime.now(timezone.utc).date(), parts[1].strip())
+    today = datetime.now(timezone.utc).date()
+    open_batch = await get_open_batch_for_date(session, source_chat_id, today)
+    if open_batch is not None:
+        # Only one batch per chat/date may be "open". Keep the current upload
+        # target untouched and create the new batch as a ready-to-fill one.
+        batch = await create_named_batch(
+            session, source_chat_id, today, parts[1].strip(), status="collection_finished"
+        )
+        await message.answer(
+            f"Created batch #{batch.id} ({batch.name or 'unnamed'}) "
+            f"status={batch.status}.\n"
+            f"Batch #{open_batch.id} is still the automatic upload target. "
+            f"Use /startbatch {batch.id} to send new uploads here."
+        )
+        return
+    batch = await create_named_batch(session, source_chat_id, today, parts[1].strip())
     await message.answer(f"Created batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}")
 
 
@@ -1456,20 +1472,52 @@ async def activebatch_cmd(message: Message, session):
     await message.answer(f"Active collecting batch #{batch.id} ({batch.name or 'unnamed'}) status={batch.status}, items={len(items)}.")
 
 
+def _parse_item_ids(raw: str) -> tuple[list[int], Optional[str]]:
+    """Parse ``50-60,65,70-72`` into a de-duplicated list of ids."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start_raw, _, end_raw = chunk.partition("-")
+            if not start_raw.strip().isdigit() or not end_raw.strip().isdigit():
+                return [], f"Invalid range '{chunk}'."
+            start, end = int(start_raw), int(end_raw)
+            if start > end:
+                return [], f"Invalid range '{chunk}': start is after end."
+            if end - start > 500:
+                return [], f"Range '{chunk}' is too large (max 500 ids)."
+            candidates = range(start, end + 1)
+        elif chunk.isdigit():
+            candidates = (int(chunk),)
+        else:
+            return [], f"Invalid id '{chunk}'."
+        for value in candidates:
+            if value not in seen:
+                seen.add(value)
+                ids.append(value)
+    if not ids:
+        return [], "No item ids given."
+    return ids, None
+
+
 async def _move_items_to_batch_reply(
     message: Message, session, command: str, raw: str
 ) -> None:
+    usage = f"Usage: {command} <id,id,start-end,...>|<batch_id>"
     parts = raw.split("|")
     if len(parts) != 2:
-        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+        await message.answer(usage)
         return
     ids_raw, batch_raw = (part.strip() for part in parts)
     if not batch_raw.isdigit():
-        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+        await message.answer(usage)
         return
-    item_ids = [int(x) for x in ids_raw.split(",") if x.strip().isdigit()]
-    if not item_ids:
-        await message.answer(f"Usage: {command} <item_id|item_id,...>|<batch_id>")
+    item_ids, error = _parse_item_ids(ids_raw)
+    if error:
+        await message.answer(f"{error}\n{usage}")
         return
     batch, moved, errors = await move_items_to_batch(session, item_ids, int(batch_raw))
     if batch is None:

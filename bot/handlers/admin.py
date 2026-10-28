@@ -75,7 +75,7 @@ async def admin_panel(message: Message):
         "/generatecaptions <batch_id> [apply] - pipe captions from filenames\n"
         "/batch <id> · /dryrun <id> · /approve <id>\n"
         "/createbatch <name> · /startbatch <id> · /activebatch · /finishbatch\n"
-        "/moveitem <item_id>|<batch_id> · /moveitems <id,id,...>|<batch_id> — move uploaded items into a batch\n"
+        "/moveitem <item_id>|<batch_id> · /moveitems <id,id,50-100,...>|<batch_id> — move uploaded items into a batch\n"
         "/publish <id>\n"
         "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"
         "/unlockpublish <item> — only if the message does not exist\n"

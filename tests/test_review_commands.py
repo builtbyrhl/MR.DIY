@@ -802,3 +802,97 @@ async def test_non_admin_cannot_use_move_commands(session, seeded_course):
         msg = SimpleNamespace(from_user=SimpleNamespace(id=999), text=text, answer=AsyncMock())
         await cmd(msg, session)
         msg.answer.assert_not_awaited()
+
+
+async def test_moveitems_accepts_id_ranges(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+    items = []
+    for message_id in (900, 901, 902):
+        item, _ = await ingest_media(
+            session,
+            source_chat_id=-1001,
+            source_message_id=message_id,
+            media_type="video",
+            caption="Anatomy A Lecture 1",
+            file_name=None,
+            file_unique_id=f"range-{message_id}",
+        )
+        items.append(item)
+    target = await _make_batch(session, "RangeBatch")
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/moveitems {items[0].id}-{items[-1].id}|{target}",
+        answer=AsyncMock(),
+    )
+    await review.moveitems_cmd(msg, session)
+    assert "Moved 3 item(s)" in msg.answer.await_args.args[0]
+    for item in items:
+        await session.refresh(item)
+        assert item.batch_id == target
+
+
+async def test_moveitems_rejects_invalid_range(monkeypatch, session, seeded_course):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text="/moveitems 10-5|1",
+        answer=AsyncMock(),
+    )
+    await review.moveitems_cmd(msg, session)
+    assert "Invalid range" in msg.answer.await_args.args[0]
+
+
+async def test_createbatch_keeps_existing_open_batch_as_upload_target(
+    monkeypatch, session, seeded_course
+):
+    seeded_course
+    monkeypatch.setenv("UPLOAD_INBOX_CHAT_ID", "-1001")
+    item, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=950,
+        media_type="video",
+        caption="Anatomy A Lecture 1",
+        file_name=None,
+        file_unique_id="create-second-batch",
+    )
+    open_batch = await get_batch(session, item.batch_id)
+    assert open_batch.status == "open"
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=123), text="/createbatch Second", answer=AsyncMock()
+    )
+    await review.createbatch_cmd(msg, session)
+    reply = msg.answer.await_args.args[0]
+    assert "Created batch" in reply
+    assert f"Batch #{open_batch.id} is still the automatic upload target" in reply
+    new_batch_id = int(reply.split()[2].replace("#", ""))
+
+    new_batch = await get_batch(session, new_batch_id)
+    assert new_batch.status == "collection_finished"
+    await session.refresh(open_batch)
+    assert open_batch.status == "open"
+
+    start = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/startbatch {new_batch_id}",
+        answer=AsyncMock(),
+    )
+    await review.startbatch_cmd(start, session)
+    assert "Started collecting" in start.answer.await_args.args[0]
+    await session.refresh(new_batch)
+    assert new_batch.status == "collecting"
+
+    collected, _ = await ingest_media(
+        session,
+        source_chat_id=-1001,
+        source_message_id=951,
+        media_type="video",
+        caption="Anatomy A Lecture 2",
+        file_name=None,
+        file_unique_id="create-second-batch-collect",
+    )
+    assert collected.batch_id == new_batch_id

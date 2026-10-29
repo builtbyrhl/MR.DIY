@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import traceback
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ErrorEvent
 from aiohttp import web
 
 from bot.config import get_settings
 from bot.db.session import get_session_factory, init_db
 from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
-from bot.services.auth import load_db_admin_cache
+from bot.services.auth import all_admin_ids, load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
 from bot.services.media_delivery import start_media_cleanup
 from bot.services.reminders import digest_loop, reminder_loop
@@ -24,9 +27,53 @@ from bot.handlers import start, subjects, lectures, bookmarks, progress, search,
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+ERROR_NOTIFY_INTERVAL_SECONDS = 300
+_error_notify_last: dict[str, float] = {}
+
+
+def _error_context(event: ErrorEvent) -> str:
+    update = event.update
+    message = getattr(update, "message", None)
+    if message is not None:
+        return f"message: {(message.text or '')[:120]}"
+    callback = getattr(update, "callback_query", None)
+    if callback is not None:
+        return f"callback: {(callback.data or '')[:120]}"
+    return f"update: {type(update).__name__}"
+
+
+def _format_error(event: ErrorEvent) -> str:
+    exc = event.exception
+    summary = f"{type(exc).__name__}: {exc}"
+    tb = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    return f"⚠️ Bot error\n{summary}\n{_error_context(event)}\n\n{tb[-1200:]}"
+
+
+async def notify_error(event: ErrorEvent) -> None:
+    exc = event.exception
+    logger.error(
+        "Unhandled update error: %s", exc, exc_info=exc
+    )
+    if isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc):
+        return
+    key = f"{type(exc).__name__}:{str(exc)[:80]}"
+    now = time.monotonic()
+    if now - _error_notify_last.get(key, 0.0) < ERROR_NOTIFY_INTERVAL_SECONDS:
+        return
+    _error_notify_last[key] = now
+    text = _format_error(event)
+    for admin_id in all_admin_ids():
+        try:
+            await event.bot.send_message(admin_id, text, parse_mode=None)
+        except Exception:
+            logger.exception("Could not send error report to admin %s", admin_id)
+
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
+    dp.errors.register(notify_error)
     # middlewares
     dp.message.middleware(DbMiddleware())
     dp.edited_message.middleware(DbMiddleware())

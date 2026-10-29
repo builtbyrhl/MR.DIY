@@ -382,6 +382,7 @@ async def _show_teacher_topic_lectures(
     return True
 
 
+@router.message(F.text == "📚 Library")
 @router.message(F.text == "📚 My Courses")
 @router.message(F.text == "📚 Subjects")
 async def subjects_cmd(message: Message, session, db_user):
@@ -414,10 +415,10 @@ async def show_subjects(cb_or_msg, session, page: int = 0, user_id: int | None =
         subjects, page=page, counts=counts, pinned_ids=pinned_ids
     )
     if subjects:
-        text = "📚 *Subjects*\nChoose a subject to start studying."
+        text = "📚 *Library*\nChoose a subject to start studying."
         text += page_suffix(page, len(subjects), 8)
     else:
-        text = "📚 *Subjects*\nNo subjects are available yet."
+        text = "📚 *Library*\nNo subjects are available yet."
     if hasattr(cb_or_msg, "message"):
         await cb_or_msg.message.edit_text(
             text, parse_mode="Markdown", reply_markup=kb

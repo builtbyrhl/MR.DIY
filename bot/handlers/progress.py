@@ -96,24 +96,16 @@ def _progress_kb(
         [
             InlineKeyboardButton(
                 text=(
-                    "🔔 Daily reminder: ON"
+                    "🔔 Reminder: ON"
                     if reminder_enabled
-                    else "🔕 Daily reminder: OFF"
+                    else "🔕 Reminder: OFF"
                 ),
                 callback_data="reminder:toggle",
-            )
-        ]
-    )
-    rows.append(
-        [
+            ),
             InlineKeyboardButton(
-                text=(
-                    "📬 Weekly digest: ON"
-                    if digest_enabled
-                    else "📭 Weekly digest: OFF"
-                ),
+                text="📬 Digest: ON" if digest_enabled else "📭 Digest: OFF",
                 callback_data="digest:toggle",
-            )
+            ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -208,6 +200,16 @@ async def progress_entry(message: Message, session, db_user):
 @router.message(Command("progress"))
 async def progress_cmd(message: Message, session, db_user):
     await progress_entry(message, session, db_user)
+
+
+@router.callback_query(F.data == "progress")
+async def cb_progress(cb: CallbackQuery, session, db_user):
+    text, kb = await build_progress(session, db_user)
+    try:
+        await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except TelegramBadRequest as exc:
+        logger.debug("Could not refresh progress message: %s", exc)
+    await cb.answer()
 
 
 async def _toggle_reminder(session, db_user) -> bool:

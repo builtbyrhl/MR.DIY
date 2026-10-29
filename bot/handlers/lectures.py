@@ -21,6 +21,7 @@ from bot.db.repo import (
     is_premium,
     list_bookmarks,
     mark_watched,
+    next_lecture_in_subject,
     remove_bookmark,
 )
 from bot.keyboards.inline import lecture_actions_kb
@@ -243,6 +244,44 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
         await session.rollback()
 
     await mark_watched(session, db_user.id, lid)
+    next_lec = await next_lecture_in_subject(session, lec)
+    rows = []
+    if next_lec is not None:
+        await decorate_lecture_titles(session, [next_lec])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"▶️ Next: {lecture_title(next_lec)}",
+                    callback_data=f"lec:{next_lec.id}",
+                )
+            ]
+        )
+    subject = await session.get(Subject, lec.subject_id)
+    if subject is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📚 More in this subject",
+                    callback_data=f"subj:{subject.slug}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🏠 Home", callback_data="home"
+            )
+        ]
+    )
+    try:
+        await cb.message.edit_text(
+            f"✅ *Watched* — {markdown_decoration.quote(lecture_title(lec))}\n\n"
+            "The lecture was sent above. What's next?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    except Exception:
+        logger.exception("Could not update lecture card after watching #%s", lid)
     await cb.answer("Sent! Marked as watched ✅")
 
 

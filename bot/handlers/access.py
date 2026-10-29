@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 
@@ -273,9 +273,7 @@ async def revoke_user_cmd(message: Message, session, bot):
     )
 
 
-@router.message(Command("myaccess"))
-@router.message(F.text == "🔑 My Access")
-async def my_access_cmd(message: Message, db_user):
+def my_access_view(db_user):
     status = access_status(db_user)
     expires = access_expires_at(db_user)
     retention = retention_hours()
@@ -331,6 +329,13 @@ async def my_access_cmd(message: Message, db_user):
         f"\n\nLecture files sent to you are automatically removed "
         f"after {retention} hours where Telegram permits."
     )
+    return text, markup
+
+
+@router.message(Command("myaccess"))
+@router.message(F.text == "🔑 My Access")
+async def my_access_cmd(message: Message, db_user):
+    text, markup = my_access_view(db_user)
     await message.answer(
         text, parse_mode="Markdown", reply_markup=markup
     )

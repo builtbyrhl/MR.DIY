@@ -129,7 +129,13 @@ def subjects_kb(
             ]
         )
     rows.extend(_nav_rows("subjpage", page, pages))
-    rows.append([InlineKeyboardButton(text="🔙 Home", callback_data="home")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔍 Search", callback_data="lib:search"),
+            InlineKeyboardButton(text="⭐ Saved", callback_data="lib:saved"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="🏠 Home", callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -437,19 +443,23 @@ def lecture_actions_kb(
                 )
             ]
         )
-    bm = "★ Remove bookmark" if is_bookmarked else "☆ Bookmark"
-    rows.append([InlineKeyboardButton(text=bm, callback_data=f"bm:{lecture_id}")])
+    bm = "⭐ Saved" if is_bookmarked else "☆ Save"
     rows.append(
         [
+            InlineKeyboardButton(text=bm, callback_data=f"bm:{lecture_id}"),
             InlineKeyboardButton(
-                text="✅ Mark as watched", callback_data=f"done:{lecture_id}"
-            )
+                text="✅ Watched", callback_data=f"done:{lecture_id}"
+            ),
         ]
     )
     rows.append(
-        [InlineKeyboardButton(text="🚩 Report a problem", callback_data=f"report:{lecture_id}")]
+        [
+            InlineKeyboardButton(
+                text="🚩 Report", callback_data=f"report:{lecture_id}"
+            ),
+            InlineKeyboardButton(text="🔙 Back", callback_data=back_callback),
+        ]
     )
-    rows.append([InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

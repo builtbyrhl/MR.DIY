@@ -6,9 +6,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📚 My Courses"), KeyboardButton(text="🏛 Browse by Institution")],
-            [KeyboardButton(text="🔍 Search"), KeyboardButton(text="▶️ Continue")],
-            [KeyboardButton(text="🔑 My Access"), KeyboardButton(text="❓ Help")],
+            [KeyboardButton(text="📚 Library"), KeyboardButton(text="▶️ Continue")],
+            [KeyboardButton(text="📈 Progress"), KeyboardButton(text="⚙️ Settings")],
         ],
         resize_keyboard=True,
     )

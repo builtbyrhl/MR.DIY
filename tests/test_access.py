@@ -268,12 +268,15 @@ async def test_start_approved_shows_student_menu(session):
 
     await cmd_start(message, session, user)
 
-    markup = message.answer.await_args.kwargs["reply_markup"]
+    first = message.answer.await_args_list[0]
+    markup = first.kwargs["reply_markup"]
     labels = [button.text for row in markup.keyboard for button in row]
-    assert "📚 My Courses" in labels
+    assert "📚 Library" in labels
     assert "▶️ Continue" in labels
-    assert "🔑 My Access" in labels
-    assert "🔍 Search" in labels
+    assert "📈 Progress" in labels
+    assert "⚙️ Settings" in labels
+    quick = message.answer.await_args
+    assert quick.args[0] == "Quick start"
 
 
 async def test_request_access_callback_notifies_admin_only_once(session):

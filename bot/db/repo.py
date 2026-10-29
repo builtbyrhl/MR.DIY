@@ -1062,6 +1062,22 @@ async def last_watched_lecture(session: AsyncSession, user_id: int) -> Optional[
     return res.scalar_one_or_none()
 
 
+async def next_lecture_in_subject(
+    session: AsyncSession, lecture: Lecture
+) -> Optional[Lecture]:
+    res = await session.execute(
+        select(Lecture)
+        .where(
+            Lecture.subject_id == lecture.subject_id,
+            Lecture.order > (lecture.order or 0),
+            Lecture.id != lecture.id,
+        )
+        .order_by(Lecture.order, Lecture.id)
+        .limit(1)
+    )
+    return res.scalar_one_or_none()
+
+
 # ---------- Bookmarks ----------
 async def add_bookmark(session: AsyncSession, user_id: int, lecture_id: int) -> bool:
     try:
@@ -1196,6 +1212,20 @@ async def list_pinned_subjects(
 
 
 # ---------- Up next suggestions ----------
+async def first_lecture_in_subject(
+    session: AsyncSession,
+    subject_id: int,
+    include_premium: bool = True,
+) -> Optional[Lecture]:
+    stmt = select(Lecture).where(Lecture.subject_id == subject_id)
+    if not include_premium:
+        stmt = stmt.where(Lecture.is_premium.is_(False))
+    res = await session.execute(
+        stmt.order_by(Lecture.order, Lecture.id).limit(1)
+    )
+    return res.scalar_one_or_none()
+
+
 async def up_next_lectures(
     session: AsyncSession,
     user_id: int,

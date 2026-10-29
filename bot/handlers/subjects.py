@@ -16,18 +16,22 @@ from bot.db.repo import (
     get_teacher,
     get_topic,
     is_following,
+    is_pinned,
     list_lectures,
     list_lectures_by_teacher,
     list_lectures_by_teacher_topic,
     list_lectures_by_topic,
+    list_pinned_subject_ids,
     list_subject_lecture_counts,
     list_subject_teacher_groups,
     list_subject_topic_groups,
     list_subjects,
     list_teacher_topic_groups,
     list_watched_lecture_ids,
+    pin_subject,
     subject_progress,
     unfollow_subject,
+    unpin_subject,
 )
 from bot.keyboards.inline import (
     institution_subjects_kb,
@@ -160,6 +164,7 @@ async def _show_teacher_groups(cb, session, subject, page: int) -> None:
     d, t = await subject_progress(session, cb.from_user.id, subject.id)
     has_topics = bool(topic_groups)
     following = await is_following(session, cb.from_user.id, subject.id)
+    pinned = await is_pinned(session, cb.from_user.id, subject.id)
     text = _teacher_groups_text(subject, d, t, groups, has_topics)
     text += page_suffix(page, len(groups), TEACHERS_PER_PAGE)
     kb = teachers_kb(
@@ -169,6 +174,7 @@ async def _show_teacher_groups(cb, session, subject, page: int) -> None:
         per_page=TEACHERS_PER_PAGE,
         has_topics=has_topics,
         following=following,
+        pinned=pinned,
     )
     await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
 
@@ -378,22 +384,35 @@ async def _show_teacher_topic_lectures(
 
 @router.message(F.text == "📚 My Courses")
 @router.message(F.text == "📚 Subjects")
-async def subjects_cmd(message: Message, session):
+async def subjects_cmd(message: Message, session, db_user):
     await ensure_subjects(session)
-    await show_subjects(message, session)
+    await show_subjects(message, session, user_id=db_user.id)
 
 
 @router.message(Command("subjects"))
-async def subjects_command(message: Message, session):
+async def subjects_command(message: Message, session, db_user):
     await ensure_subjects(session)
-    await show_subjects(message, session)
+    await show_subjects(message, session, user_id=db_user.id)
 
 
-async def show_subjects(cb_or_msg, session, page: int = 0):
+async def show_subjects(cb_or_msg, session, page: int = 0, user_id: int | None = None):
     subjects = await list_subjects(session)
+    pinned_ids: set[int] = set()
+    if user_id is not None:
+        pinned_ids = set(await list_pinned_subject_ids(session, user_id))
+        if pinned_ids:
+            subjects.sort(
+                key=lambda s: (
+                    0 if s.id in pinned_ids else 1,
+                    s.order or 0,
+                    s.name,
+                )
+            )
     page = _clamp_page(page, len(subjects), 8)
     counts = await list_subject_lecture_counts(session)
-    kb = subjects_kb(subjects, page=page, counts=counts)
+    kb = subjects_kb(
+        subjects, page=page, counts=counts, pinned_ids=pinned_ids
+    )
     if subjects:
         text = "📚 *Subjects*\nChoose a subject to start studying."
         text += page_suffix(page, len(subjects), 8)
@@ -415,7 +434,7 @@ async def _answer_subject_error(cb: CallbackQuery, message: str) -> None:
 @router.callback_query(F.data == "subjects")
 async def cb_subjects(cb: CallbackQuery, session):
     try:
-        await show_subjects(cb, session)
+        await show_subjects(cb, session, user_id=cb.from_user.id)
     except Exception:
         await _answer_subject_error(cb, "Failed to show subject list")
         return
@@ -426,7 +445,7 @@ async def cb_subjects(cb: CallbackQuery, session):
 async def cb_subjpage(cb: CallbackQuery, session):
     try:
         page = int(cb.data.split(":")[1])
-        await show_subjects(cb, session, page=page)
+        await show_subjects(cb, session, page=page, user_id=cb.from_user.id)
     except Exception:
         await _answer_subject_error(cb, "Failed to change subject page")
         return
@@ -622,6 +641,31 @@ async def cb_follow_subject(cb: CallbackQuery, session, db_user):
         return
     except Exception:
         await _answer_subject_error(cb, f"Failed to toggle alerts for {cb.data}")
+        return
+
+
+@router.callback_query(F.data.startswith("pin:"))
+async def cb_pin_subject(cb: CallbackQuery, session, db_user):
+    try:
+        subject_raw = cb.data.split(":", 1)[1]
+        subject = await session.get(Subject, int(subject_raw))
+        if not subject:
+            await cb.answer("Not found", show_alert=True)
+            return
+        user_id = cb.from_user.id
+        if await is_pinned(session, user_id, subject.id):
+            await unpin_subject(session, user_id, subject.id)
+            note = f"📌 Unpinned {subject.name}."
+        else:
+            await pin_subject(session, user_id, subject.id)
+            note = f"📌 Pinned {subject.name} to the top of your list."
+        await _show_teacher_groups(cb, session, subject, 0)
+        await cb.answer(note, show_alert=False)
+    except (TypeError, ValueError):
+        await cb.answer("Not found", show_alert=True)
+        return
+    except Exception:
+        await _answer_subject_error(cb, f"Failed to toggle pin for {cb.data}")
         return
 
 

@@ -791,6 +791,192 @@ async def dryrun_cmd(message: Message, session):
     await _reply_lines(message, lines)
 
 
+BATCHOPS_HELP = (
+    "Usage: /batchops <batch_id>|<action>\n"
+    "Actions: report (default), approve, publish, ship, retry, skip\n"
+    "  report  - counts only, changes nothing\n"
+    "  approve - approve the batch once nothing is unresolved\n"
+    "  publish - publish an already approved batch\n"
+    "  ship    - approve (if needed) then publish\n"
+    "  retry   - reclassify unresolved items\n"
+    "  skip    - skip unresolved items (refused once approved)"
+)
+
+UNRESOLVED_STATUSES = {"received", "needs_review", "failed", "paused"}
+
+
+def _batch_summary(batch, items) -> list[str]:
+    unresolved = [i for i in items if i.status in UNRESOLVED_STATUSES]
+    published = [
+        i for i in items
+        if i.publication_status == "published"
+        or i.published_message_id is not None
+    ]
+    failed_publish = [
+        i for i in items
+        if i.publication_status == "failed" and i not in published
+    ]
+    skipped = [i for i in items if i.status == "skipped"]
+    in_flight = [
+        i for i in items
+        if i.publication_status == "publishing" and i not in published
+    ]
+    ready = [
+        i for i in items
+        if i not in unresolved
+        and i not in skipped
+        and i not in published
+        and i not in failed_publish
+        and i not in in_flight
+    ]
+    lines = [
+        f"Batch #{batch.id} · {batch.name or 'unnamed'} · {batch.status} "
+        f"· {len(items)} item(s)",
+        f"Ready: {len(ready)} · Published: {len(published)} "
+        f"· Skipped: {len(skipped)}",
+        f"Unresolved: {len(unresolved)} · Publish failures: {len(failed_publish)} "
+        f"· In flight: {len(in_flight)}",
+    ]
+    if unresolved:
+        ids = ", ".join(f"#{i.id}" for i in unresolved[:10])
+        more = " …" if len(unresolved) > 10 else ""
+        lines.append(f"Unresolved ids: {ids}{more}")
+    if failed_publish:
+        ids = ", ".join(f"#{i.id}" for i in failed_publish[:10])
+        lines.append(
+            f"Failed publish ids: {ids} - use /unlockpublish or /reconcilepublish"
+        )
+    if in_flight:
+        ids = ", ".join(f"#{i.id}" for i in in_flight[:10])
+        lines.append(f"In-flight ids: {ids} - reconcile before retrying")
+    return lines
+
+
+@router.message(Command("batchops"))
+async def batchops_cmd(message: Message, session, bot: Bot):
+    if not _authorized(message):
+        return
+    raw = _args_raw(message, "/batchops").strip()
+    batch_part, _, action = raw.partition("|")
+    batch_part = batch_part.strip()
+    action = action.strip().lower() or "report"
+    if not batch_part.isdigit():
+        await message.answer(BATCHOPS_HELP, parse_mode=None)
+        return
+    if action not in {"report", "approve", "publish", "ship", "retry", "skip"}:
+        await message.answer(
+            f"Unknown action '{action}'.\n\n{BATCHOPS_HELP}", parse_mode=None
+        )
+        return
+    batch = await get_batch(session, int(batch_part))
+    if not batch:
+        await message.answer("Batch not found.", parse_mode=None)
+        return
+
+    if action == "report":
+        items = await get_batch_items(session, batch.id)
+        await _reply_lines(message, _batch_summary(batch, items))
+        return
+
+    if action in {"retry", "skip"}:
+        if batch.status == "approved":
+            await message.answer(
+                "Batch is approved; /retry and /skip are refused. Use "
+                "/unlockpublish or /reconcilepublish for publish failures.",
+                parse_mode=None,
+            )
+            return
+        items = await get_batch_items(session, batch.id)
+        targets = [item for item in items if item.status in UNRESOLVED_STATUSES]
+        if not targets:
+            await message.answer(
+                "Nothing to do: no unresolved items in this batch.",
+                parse_mode=None,
+            )
+            return
+        changed: list[int] = []
+        try:
+            for item in targets[:MAX_BULK_ITEMS]:
+                result = (
+                    await retry_item(session, item.id)
+                    if action == "retry"
+                    else await skip_item(session, item.id)
+                )
+                if result:
+                    changed.append(item.id)
+        except ApprovedBatchError as exc:
+            await message.answer(str(exc), parse_mode=None)
+            return
+        verb = "Reclassified" if action == "retry" else "Skipped"
+        await record_admin_action(
+            session,
+            message.from_user.id,
+            f"{action}_batch",
+            target_type="batch",
+            target_id=batch.id,
+            details=f"items={len(changed)}",
+        )
+        items = await get_batch_items(session, batch.id)
+        lines = [f"{verb} {len(changed)} item(s)."]
+        if len(targets) > MAX_BULK_ITEMS:
+            lines.append(
+                f"Only the first {MAX_BULK_ITEMS} of {len(targets)} were processed."
+            )
+        lines.extend(_batch_summary(batch, items))
+        await _reply_lines(message, lines)
+        return
+
+    if action in {"approve", "ship"} and batch.status != "approved":
+        ok, text = await approve_batch(
+            session, batch.id, message.from_user.id
+        )
+        if not ok:
+            items = await get_batch_items(session, batch.id)
+            await _reply_lines(message, [text] + _batch_summary(batch, items))
+            return
+        await record_admin_action(
+            session,
+            message.from_user.id,
+            "approve_batch",
+            target_type="batch",
+            target_id=batch.id,
+            details="via batchops",
+        )
+        batch = await get_batch(session, batch.id)
+
+    if action == "approve":
+        items = await get_batch_items(session, batch.id)
+        await _reply_lines(
+            message, ["Batch approved."] + _batch_summary(batch, items)
+        )
+        return
+
+    result = await publish_batch(session, bot, batch.id)
+    if result.error:
+        await message.answer(result.error, parse_mode=None)
+        return
+
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "publish_batch",
+        target_type="batch",
+        target_id=result.batch_id,
+        details=(
+            f"{result.published} published, "
+            f"{len(result.failures)} failed, via batchops"
+        ),
+    )
+    lines = [
+        f"Batch #{result.batch_id} publish: {result.published} published, "
+        f"{result.already_published} already published, "
+        f"{result.skipped} skipped, {len(result.failures)} failed."
+    ]
+    for failure in result.failures:
+        lines.append(f"#{failure.item_id}: {failure.reason}")
+    await _reply_lines(message, lines)
+
+
 @router.message(Command("refreshcaptions"))
 async def refreshcaptions_cmd(message: Message, session, bot: Bot):
     if not _authorized(message):

@@ -19,6 +19,7 @@ from bot.db.repo import (
     count_watched,
     count_watched_since,
     is_premium,
+    list_pinned_subjects,
     list_subjects,
     recent_watch_history,
     set_digest_enabled,
@@ -57,9 +58,22 @@ def _relative_when(when: datetime, today) -> str:
 
 
 def _progress_kb(
-    up_next, history, reminder_enabled: bool, digest_enabled: bool
+    up_next,
+    history,
+    reminder_enabled: bool,
+    digest_enabled: bool,
+    pinned=None,
 ) -> InlineKeyboardMarkup:
     rows = [
+        [
+            InlineKeyboardButton(
+                text=clip(f"📌 {subject.name}"),
+                callback_data=f"subj:{subject.slug}",
+            )
+        ]
+        for subject in (pinned or [])
+    ]
+    rows.extend(
         [
             InlineKeyboardButton(
                 text=_up_next_label(subject, lecture),
@@ -67,7 +81,7 @@ def _progress_kb(
             )
         ]
         for subject, lecture in up_next
-    ]
+    )
     rows.extend(
         [
             InlineKeyboardButton(
@@ -126,9 +140,12 @@ async def build_progress(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
         session, db_user.id, limit=3, include_premium=premium
     )
     history = await recent_watch_history(session, db_user.id, limit=3)
+    pinned = await list_pinned_subjects(session, db_user.id)
     reminder_enabled = bool(getattr(db_user, "reminder_enabled", False))
     digest_enabled = bool(getattr(db_user, "digest_enabled", False))
-    kb = _progress_kb(up_next, history, reminder_enabled, digest_enabled)
+    kb = _progress_kb(
+        up_next, history, reminder_enabled, digest_enabled, pinned=pinned
+    )
 
     if not lines:
         return (
@@ -158,6 +175,11 @@ async def build_progress(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
         f"{watched_week} this week\n\n"
         + "\n".join(lines)
     )
+    if pinned:
+        names = ", ".join(
+            markdown_decoration.quote(subject.name) for subject in pinned
+        )
+        text += f"\n\n📌 *Pinned*: {names}"
     if up_next:
         text += "\n\n🎯 *Up next*"
         for subject, lecture in up_next:

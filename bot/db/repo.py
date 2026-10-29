@@ -16,6 +16,7 @@ from bot.db.models import (
     Bookmark,
     Lecture,
     Payment,
+    PinnedSubject,
     Progress,
     Subject,
     SubjectFollower,
@@ -1129,6 +1130,69 @@ async def list_subject_follower_ids(session: AsyncSession, subject_id: int) -> l
         select(SubjectFollower.user_id).where(SubjectFollower.subject_id == subject_id)
     )
     return [int(v) for v in res.scalars().all()]
+
+
+# ---------- Pinned subjects ----------
+async def pin_subject(session: AsyncSession, user_id: int, subject_id: int) -> bool:
+    res = await session.execute(
+        select(PinnedSubject).where(
+            PinnedSubject.user_id == user_id,
+            PinnedSubject.subject_id == subject_id,
+        )
+    )
+    if res.scalar_one_or_none() is not None:
+        return True
+    session.add(PinnedSubject(user_id=user_id, subject_id=subject_id))
+    try:
+        await session.commit()
+        return True
+    except Exception:
+        await session.rollback()
+        return False
+
+
+async def unpin_subject(
+    session: AsyncSession, user_id: int, subject_id: int
+) -> bool:
+    res = await session.execute(
+        delete(PinnedSubject).where(
+            PinnedSubject.user_id == user_id,
+            PinnedSubject.subject_id == subject_id,
+        )
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def is_pinned(session: AsyncSession, user_id: int, subject_id: int) -> bool:
+    res = await session.execute(
+        select(PinnedSubject.id).where(
+            PinnedSubject.user_id == user_id,
+            PinnedSubject.subject_id == subject_id,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def list_pinned_subject_ids(
+    session: AsyncSession, user_id: int
+) -> list[int]:
+    res = await session.execute(
+        select(PinnedSubject.subject_id).where(PinnedSubject.user_id == user_id)
+    )
+    return [int(v) for v in res.scalars().all()]
+
+
+async def list_pinned_subjects(
+    session: AsyncSession, user_id: int
+) -> list[Subject]:
+    res = await session.execute(
+        select(Subject)
+        .join(PinnedSubject, PinnedSubject.subject_id == Subject.id)
+        .where(PinnedSubject.user_id == user_id)
+        .order_by(Subject.order, Subject.name)
+    )
+    return list(res.scalars().all())
 
 
 # ---------- Up next suggestions ----------

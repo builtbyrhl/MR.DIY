@@ -245,7 +245,7 @@ async def test_empty_subject_callback_explains_missing_lectures(
     text = cb.message.edit_text.await_args.args[0]
     assert "No lectures uploaded yet for this subject." in text
     data = _button_data(cb.message.edit_text.await_args.kwargs["reply_markup"])
-    assert data == [f"follow:{subject.id}", "subjects"]
+    assert data == [f"follow:{subject.id}", f"pin:{subject.id}", "subjects"]
     cb.answer.assert_awaited_once_with()
 
 

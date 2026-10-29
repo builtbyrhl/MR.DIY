@@ -105,15 +105,19 @@ def subjects_kb(
     page: int = 0,
     per_page: int = 8,
     counts: dict[int, int] | None = None,
+    pinned_ids: set[int] | None = None,
 ) -> InlineKeyboardMarkup:
     pages = total_pages(len(subjects), per_page)
     page = clamp_page(page, len(subjects), per_page)
     start = page * per_page
     chunk = subjects[start:start + per_page]
     counts = counts or {}
+    pinned = pinned_ids or set()
     rows = []
     for subject in chunk:
         label = f"{subject.emoji} {subject.name}"
+        if subject.id in pinned:
+            label = f"📌 {label}"
         if subject.id in counts:
             label += f" · {counts[subject.id]}"
         rows.append(
@@ -166,6 +170,7 @@ def teachers_kb(
     per_page: int = 8,
     has_topics: bool = False,
     following: bool = False,
+    pinned: bool = False,
 ) -> InlineKeyboardMarkup:
     pages = total_pages(len(groups), per_page)
     page = clamp_page(page, len(groups), per_page)
@@ -197,6 +202,10 @@ def teachers_kb(
     )
     rows.append(
         [InlineKeyboardButton(text=alert_label, callback_data=f"follow:{subject_id}")]
+    )
+    pin_label = "📌 Unpin subject" if pinned else "📌 Pin subject"
+    rows.append(
+        [InlineKeyboardButton(text=pin_label, callback_data=f"pin:{subject_id}")]
     )
     rows.append([InlineKeyboardButton(text="🔙 Subjects", callback_data="subjects")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

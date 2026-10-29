@@ -79,6 +79,7 @@ async def admin_panel(message: Message):
         "/createbatch <name> · /startbatch <id> · /activebatch · /finishbatch\n"
         "/moveitem <item_id>|<batch_id> · /moveitems <id,id,50-100,...>|<batch_id> — move uploaded items into a batch\n"
         "/publish <id>\n"
+        "/batchops <id>|<report|approve|publish|ship|retry|skip> - bulk batch workflow\n"
         "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"
         "/unlockpublish <item> — only if the message does not exist\n"
         "/skip <item> · /keep <item> · /retry <item>\n"

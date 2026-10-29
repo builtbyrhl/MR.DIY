@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, update, delete, insert, or_
+from sqlalchemy import select, func, update, delete, insert, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1158,6 +1158,64 @@ async def up_next_lectures(
         if len(picks) >= max(limit, 0):
             break
     return picks
+
+
+# ---------- Watch history ----------
+async def recent_watch_history(
+    session: AsyncSession, user_id: int, limit: int = 5
+) -> list[tuple[Lecture, Subject, datetime]]:
+    res = await session.execute(
+        select(Lecture, Subject, Progress.watched_at)
+        .join(Subject, Subject.id == Lecture.subject_id)
+        .join(Progress, Progress.lecture_id == Lecture.id)
+        .where(
+            Progress.user_id == user_id,
+            Progress.watched.is_(True),
+            Progress.watched_at.is_not(None),
+        )
+        .order_by(Progress.watched_at.desc())
+        .limit(max(limit, 0))
+    )
+    return [(lecture, subject, watched_at) for lecture, subject, watched_at in res.all()]
+
+
+# ---------- Admin analytics ----------
+async def subject_lecture_views(
+    session: AsyncSession, subject_id: int
+) -> list[tuple[Lecture, int]]:
+    views = func.count(Progress.id)
+    res = await session.execute(
+        select(Lecture, views)
+        .outerjoin(
+            Progress,
+            and_(Progress.lecture_id == Lecture.id, Progress.watched.is_(True)),
+        )
+        .where(Lecture.subject_id == subject_id)
+        .group_by(Lecture.id)
+        .order_by(views.desc(), Lecture.order, Lecture.id)
+    )
+    return [(lecture, int(total)) for lecture, total in res.all()]
+
+
+async def subject_view_overview(
+    session: AsyncSession,
+) -> list[tuple[Subject, int, int]]:
+    lecture_count = func.count(func.distinct(Lecture.id))
+    view_count = func.count(Progress.id)
+    res = await session.execute(
+        select(Subject, lecture_count, view_count)
+        .outerjoin(Lecture, Lecture.subject_id == Subject.id)
+        .outerjoin(
+            Progress,
+            and_(Progress.lecture_id == Lecture.id, Progress.watched.is_(True)),
+        )
+        .group_by(Subject.id)
+        .order_by(Subject.order, Subject.id)
+    )
+    return [
+        (subject, int(lectures), int(views))
+        for subject, lectures, views in res.all()
+    ]
 
 
 # ---------- Daily reminders ----------

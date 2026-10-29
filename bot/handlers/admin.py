@@ -90,6 +90,7 @@ async def admin_panel(message: Message):
         "📊 Utilities:\n"
         "/stats\n"
         "/dashboard — student activity and watch stats\n"
+        "/analytics [subject_slug] — views per lecture\n"
         "/whereami\n\n"
         "🔐 Admins (private chat only):\n"
         "/admins\n"
@@ -499,6 +500,65 @@ async def dashboard_cmd(message: Message, session):
             f"   {i}. {name} — {total} views"
             for i, (name, total) in enumerate(top_subjects, start=1)
         )
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("analytics"))
+async def analytics_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.repo import (
+        get_subject,
+        subject_lecture_views,
+        subject_view_overview,
+    )
+    from bot.student_ui import clip, lecture_title
+
+    parts = (message.text or "").split(maxsplit=1)
+    slug = parts[1].strip() if len(parts) > 1 else ""
+
+    if not slug:
+        rows = await subject_view_overview(session)
+        if not rows:
+            await message.answer("No subjects yet.")
+            return
+        lines = ["📊 Lecture analytics — all subjects", ""]
+        for subject, lectures, views in rows:
+            avg = f"{views / lectures:.1f}" if lectures else "0"
+            lines.append(
+                f"{subject.emoji} {subject.name} — {lectures} lectures · "
+                f"{views} views · avg {avg}"
+            )
+        lines.extend(
+            ["", "Use /analytics <subject_slug> for per-lecture detail."]
+        )
+        await message.answer("\n".join(lines), parse_mode=None)
+        return
+
+    subject = await get_subject(session, slug)
+    if subject is None:
+        await message.answer(
+            f"Subject '{slug}' not found. Use /subjects to list slugs.",
+            parse_mode=None,
+        )
+        return
+
+    rows = await subject_lecture_views(session, subject.id)
+    total_views = sum(views for _, views in rows)
+    avg = f"{total_views / len(rows):.1f}" if rows else "0"
+    lines = [
+        f"📊 Analytics — {subject.name}",
+        f"Lectures: {len(rows)} · Total views: {total_views} · Avg: {avg}",
+    ]
+    no_views = sum(1 for _, views in rows if views == 0)
+    if no_views:
+        lines.append(f"⚠️ {no_views} lecture(s) with no views yet")
+    lines.append("")
+    for i, (lecture, views) in enumerate(rows[:20], start=1):
+        order = f"L{lecture.order} — " if lecture.order else ""
+        lines.append(f"{i}. {order}{clip(lecture_title(lecture))} — {views} views")
+    if len(rows) > 20:
+        lines.append(f"...and {len(rows) - 20} more")
     await message.answer("\n".join(lines), parse_mode=None)
 
 

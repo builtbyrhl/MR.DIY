@@ -20,6 +20,7 @@ from bot.db.repo import (
     count_watched_since,
     is_premium,
     list_subjects,
+    recent_watch_history,
     set_reminder_enabled,
     subject_progress,
     up_next_lectures,
@@ -39,7 +40,22 @@ def _up_next_label(subject, lecture) -> str:
     return clip(label)
 
 
-def _progress_kb(up_next, reminder_enabled: bool) -> InlineKeyboardMarkup:
+def _history_label(subject, lecture) -> str:
+    return clip(f"🕘 {subject.name} · {lecture_title(lecture)}")
+
+
+def _relative_when(when: datetime, today) -> str:
+    days = (today - when.date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    return when.strftime("%d %b")
+
+
+def _progress_kb(up_next, history, reminder_enabled: bool) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -49,6 +65,15 @@ def _progress_kb(up_next, reminder_enabled: bool) -> InlineKeyboardMarkup:
         ]
         for subject, lecture in up_next
     ]
+    rows.extend(
+        [
+            InlineKeyboardButton(
+                text=_history_label(subject, lecture),
+                callback_data=f"lec:{lecture.id}",
+            )
+        ]
+        for lecture, subject, _when in history
+    )
     rows.extend(browse_subjects_kb().inline_keyboard)
     rows.append(
         [
@@ -85,8 +110,9 @@ async def build_progress(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
     up_next = await up_next_lectures(
         session, db_user.id, limit=3, include_premium=premium
     )
+    history = await recent_watch_history(session, db_user.id, limit=3)
     reminder_enabled = bool(getattr(db_user, "reminder_enabled", False))
-    kb = _progress_kb(up_next, reminder_enabled)
+    kb = _progress_kb(up_next, history, reminder_enabled)
 
     if not lines:
         return (
@@ -122,6 +148,14 @@ async def build_progress(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
             text += (
                 f"\n{subject.emoji} {markdown_decoration.quote(subject.name)} — "
                 f"{markdown_decoration.quote(lecture_title(lecture))}"
+            )
+    if history:
+        text += "\n\n🕘 *Recently watched*"
+        for lecture, subject, when in history:
+            text += (
+                f"\n{markdown_decoration.quote(subject.name)} — "
+                f"{markdown_decoration.quote(lecture_title(lecture))}"
+                f" · {_relative_when(when, today)}"
             )
     text += "\n\n" + ("💎 Premium active" if premium else "🆓 Free plan")
     return text, kb

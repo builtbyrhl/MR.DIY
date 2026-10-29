@@ -21,6 +21,7 @@ from bot.db.repo import (
     is_premium,
     list_subjects,
     recent_watch_history,
+    set_digest_enabled,
     set_reminder_enabled,
     subject_progress,
     up_next_lectures,
@@ -55,7 +56,9 @@ def _relative_when(when: datetime, today) -> str:
     return when.strftime("%d %b")
 
 
-def _progress_kb(up_next, history, reminder_enabled: bool) -> InlineKeyboardMarkup:
+def _progress_kb(
+    up_next, history, reminder_enabled: bool, digest_enabled: bool
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -87,6 +90,18 @@ def _progress_kb(up_next, history, reminder_enabled: bool) -> InlineKeyboardMark
             )
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=(
+                    "📬 Weekly digest: ON"
+                    if digest_enabled
+                    else "📭 Weekly digest: OFF"
+                ),
+                callback_data="digest:toggle",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -112,7 +127,8 @@ async def build_progress(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
     )
     history = await recent_watch_history(session, db_user.id, limit=3)
     reminder_enabled = bool(getattr(db_user, "reminder_enabled", False))
-    kb = _progress_kb(up_next, history, reminder_enabled)
+    digest_enabled = bool(getattr(db_user, "digest_enabled", False))
+    kb = _progress_kb(up_next, history, reminder_enabled, digest_enabled)
 
     if not lines:
         return (
@@ -201,4 +217,36 @@ async def reminder_cmd(message: Message, session, db_user):
         "🔔 Daily reminder on — I'll nudge you every evening."
         if enabled
         else "🔕 Daily reminder off."
+    )
+
+
+async def _toggle_digest(session, db_user) -> bool:
+    enabled = not bool(getattr(db_user, "digest_enabled", False))
+    await set_digest_enabled(session, db_user.id, enabled)
+    db_user.digest_enabled = enabled
+    return enabled
+
+
+@router.callback_query(F.data == "digest:toggle")
+async def digest_toggle(cb: CallbackQuery, session, db_user):
+    enabled = await _toggle_digest(session, db_user)
+    text, kb = await build_progress(session, db_user)
+    try:
+        await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except TelegramBadRequest as exc:
+        logger.debug("Digest toggle could not edit progress message: %s", exc)
+    await cb.answer(
+        "📬 Weekly digest on — look out for it every Sunday."
+        if enabled
+        else "📭 Weekly digest off."
+    )
+
+
+@router.message(Command("digest"))
+async def digest_cmd(message: Message, session, db_user):
+    enabled = await _toggle_digest(session, db_user)
+    await message.answer(
+        "📬 Weekly digest on — look out for it every Sunday."
+        if enabled
+        else "📭 Weekly digest off."
     )

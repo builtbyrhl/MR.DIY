@@ -34,6 +34,8 @@ from bot.services.access import (
 from bot.services.auth import is_admin
 from bot.services.media_delivery import retention_hours
 
+from bot.db.repo import record_admin_action
+
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -186,6 +188,14 @@ async def approve_user_cmd(message: Message, session, bot):
         days=days,
     )
     notified = await _notify_decision(bot, user, approved=True)
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "approve_access",
+        target_type="user",
+        target_id=user_id,
+        details=None if days is None else f"days={days}",
+    )
     suffix = "" if notified else " The user could not be notified."
     if days is None:
         expires = access_expires_at(user)
@@ -217,6 +227,13 @@ async def reject_user_cmd(message: Message, session, bot):
         await message.answer(f"User {user_id} was not found.", parse_mode=None)
         return
     notified = await _notify_decision(bot, user, approved=False)
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "reject_access",
+        target_type="user",
+        target_id=user_id,
+    )
     suffix = "" if notified else " The user could not be notified."
     await message.answer(
         f"Rejected library access for {user_id}.{suffix}",
@@ -241,6 +258,13 @@ async def revoke_user_cmd(message: Message, session, bot):
         return
     notified = await _notify_decision(
         bot, user, approved=False, revoked=True
+    )
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "revoke_access",
+        target_type="user",
+        target_id=user_id,
     )
     suffix = "" if notified else " The user could not be notified."
     await message.answer(
@@ -381,6 +405,14 @@ async def access_decision_cb(cb: CallbackQuery, session, bot):
 
     notified = await _notify_decision(
         bot, user, approved=(action == "approve")
+    )
+    await record_admin_action(
+        session,
+        cb.from_user.id,
+        "approve_access" if action == "approve" else "reject_access",
+        target_type="user",
+        target_id=user_id,
+        details="via access button",
     )
 
     message_text = getattr(cb.message, "text", None) or ""

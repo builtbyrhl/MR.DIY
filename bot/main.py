@@ -17,7 +17,7 @@ from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.services.auth import load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
 from bot.services.media_delivery import start_media_cleanup
-from bot.services.reminders import reminder_loop
+from bot.services.reminders import digest_loop, reminder_loop
 
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, access, admin, channel, review, ingest
 
@@ -121,6 +121,7 @@ async def run_polling():
     cleanup_task = None
     sync_task = None
     reminder_task = None
+    digest_task = None
     try:
         await on_startup(bot)
         # Keep pending updates: messages sent while the bot was down are
@@ -130,6 +131,9 @@ async def run_polling():
         sync_task = asyncio.create_task(sync_catalogue_background())
         reminder_task = asyncio.create_task(
             reminder_loop(bot, settings.reminder_hour_utc)
+        )
+        digest_task = asyncio.create_task(
+            digest_loop(bot, settings.digest_weekday, settings.digest_hour_utc)
         )
         try:
             await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=False)
@@ -143,6 +147,7 @@ async def run_polling():
         await _cancel_task(cleanup_task)
         await _cancel_task(sync_task)
         await _cancel_task(reminder_task)
+        await _cancel_task(digest_task)
         if runner is not None:
             await runner.cleanup()
 
@@ -176,6 +181,7 @@ async def run_webhook():
     cleanup_task = None
     sync_task = None
     reminder_task = None
+    digest_task = None
     try:
         await on_startup(bot)
         await bot.set_webhook(settings.webhook_url, secret_token=settings.webhook_secret, allowed_updates=["message", "edited_message", "callback_query", "chat_member"])
@@ -184,11 +190,15 @@ async def run_webhook():
         reminder_task = asyncio.create_task(
             reminder_loop(bot, settings.reminder_hour_utc)
         )
+        digest_task = asyncio.create_task(
+            digest_loop(bot, settings.digest_weekday, settings.digest_hour_utc)
+        )
         await asyncio.Event().wait()
     finally:
         await _cancel_task(cleanup_task)
         await _cancel_task(sync_task)
         await _cancel_task(reminder_task)
+        await _cancel_task(digest_task)
         await runner.cleanup()
 
 

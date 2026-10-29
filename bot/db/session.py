@@ -43,6 +43,8 @@ _USER_ACCESS_NEW_COLUMNS = (
     ("last_study_date", Date()),
     ("reminder_enabled", Boolean()),
     ("last_reminder_date", Date()),
+    ("digest_enabled", Boolean()),
+    ("last_digest_date", Date()),
 )
 
 _USER_ACCESS_INDEX = "ix_users_access_status"

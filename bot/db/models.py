@@ -50,6 +50,10 @@ class User(Base):
         Boolean, default=False, server_default=false(), nullable=False
     )
     last_reminder_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    digest_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    last_digest_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -261,6 +265,21 @@ class Bookmark(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="bookmarks")
+
+
+class AdminAction(Base):
+    """An audit entry for an administrator action taken from the bot."""
+
+    __tablename__ = "admin_actions"
+    __table_args__ = (Index("ix_admin_actions_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger)
+    action: Mapped[str] = mapped_column(String(32))
+    target_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    target_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class SubjectFollower(Base):

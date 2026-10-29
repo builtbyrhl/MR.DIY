@@ -146,8 +146,12 @@ async def test_reminder_toggle_flips_flag_and_rerenders(session, catalogue):
     await session.refresh(user)
     assert user.reminder_enabled is True
     markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
-    label = markup.inline_keyboard[-1][0].text
-    assert "ON" in label
+    labels = {
+        button.callback_data: button.text
+        for row in markup.inline_keyboard
+        for button in row
+    }
+    assert "ON" in labels["reminder:toggle"]
 
     await reminder_toggle(cb, session, user)
     await session.refresh(user)

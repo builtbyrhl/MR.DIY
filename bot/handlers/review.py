@@ -51,6 +51,7 @@ from bot.db.repo import (
     list_topics,
     remove_teacher_alias,
     rename_teacher,
+    record_admin_action,
     set_lecture_teacher,
     set_lecture_title,
     set_lecture_topics,
@@ -1367,6 +1368,14 @@ async def approve_cmd(message: Message, session):
         await message.answer("Usage: /approve <batch_id>", parse_mode=None)
         return
     ok, text = await approve_batch(session, int(args[0]), message.from_user.id)
+    if ok:
+        await record_admin_action(
+            session,
+            message.from_user.id,
+            "approve_batch",
+            target_type="batch",
+            target_id=int(args[0]),
+        )
     await message.answer(text)
 
 
@@ -1529,6 +1538,14 @@ async def _move_items_to_batch_reply(
             parse_mode=None,
         )
         return
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "move_items",
+        target_type="batch",
+        target_id=batch.id,
+        details=f"moved={len(moved)}",
+    )
     await message.answer(
         f"Moved {len(moved)} item(s) into batch #{batch.id} "
         f"({batch.name or 'unnamed'}). They are not approved or published.",
@@ -1564,6 +1581,18 @@ async def publish_cmd(message: Message, session, bot: Bot):
         await message.answer(result.error)
         return
 
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "publish_batch",
+        target_type="batch",
+        target_id=result.batch_id,
+        details=(
+            f"{result.published} published, "
+            f"{len(result.failures)} failed"
+        ),
+    )
+
     lines = [
         f"Batch #{result.batch_id} publish: {result.published} published, "
         f"{result.already_published} already published, {result.skipped} skipped, "
@@ -1586,6 +1615,13 @@ async def unlockpublish_cmd(message: Message, session):
     if error:
         await message.answer(error)
         return
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "unlock_publish",
+        target_type="item",
+        target_id=int(args[0]),
+    )
     await message.answer(
         f"Item #{item.id} unlocked. Verify the destination topic before "
         "running /publish again."
@@ -1629,6 +1665,14 @@ async def reconcilepublish_cmd(message: Message, session):
         await message.answer(error)
         return
 
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "reconcile_publish",
+        target_type="item",
+        target_id=item.id,
+        details=f"message={item.published_message_id}",
+    )
     await message.answer(
         f"Item #{item.id} reconciled as published (message {item.published_message_id}). "
         "No message was sent."
@@ -2093,6 +2137,12 @@ async def assign_cmd(message: Message, session):
             f"Assignment failed: {exc}\nNo changes were applied."
         )
         return
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "assign_items",
+        details=f"items={len(item_ids)}",
+    )
     await _reply_lines(message, lines)
 
 

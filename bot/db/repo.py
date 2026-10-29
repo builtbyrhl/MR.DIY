@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -10,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
+    AdminAction,
     AdminUser,
     Bookmark,
     Lecture,
@@ -26,6 +28,8 @@ from bot.db.models import (
     upload_item_topics,
 )
 from bot.services.lecture_display import decorate_lecture_titles
+
+logger = logging.getLogger(__name__)
 
 TEACHER_UNSPECIFIED = "Teacher not specified"
 
@@ -1253,6 +1257,76 @@ async def mark_reminder_sent(
         update(User).where(User.id == user_id).values(last_reminder_date=sent_on)
     )
     await session.commit()
+
+
+# ---------- Weekly digest ----------
+async def set_digest_enabled(
+    session: AsyncSession, user_id: int, enabled: bool
+) -> bool:
+    res = await session.execute(
+        update(User).where(User.id == user_id).values(digest_enabled=enabled)
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def list_digest_recipients(session: AsyncSession, today: date) -> list[User]:
+    res = await session.execute(
+        select(User)
+        .where(
+            User.digest_enabled.is_(True),
+            or_(User.last_digest_date.is_(None), User.last_digest_date < today),
+        )
+        .order_by(User.id)
+    )
+    return list(res.scalars().all())
+
+
+async def mark_digest_sent(
+    session: AsyncSession, user_id: int, sent_on: date
+) -> None:
+    await session.execute(
+        update(User).where(User.id == user_id).values(last_digest_date=sent_on)
+    )
+    await session.commit()
+
+
+# ---------- Admin audit log ----------
+async def record_admin_action(
+    session: AsyncSession,
+    admin_id: int,
+    action: str,
+    *,
+    target_type: str | None = None,
+    target_id: int | None = None,
+    details: str | None = None,
+) -> None:
+    """Best-effort audit entry; never lets a logging failure break the action."""
+    try:
+        session.add(
+            AdminAction(
+                admin_id=admin_id,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                details=details,
+            )
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.warning("Failed to record admin action %s", action, exc_info=True)
+
+
+async def list_admin_actions(
+    session: AsyncSession, limit: int = 20
+) -> list[AdminAction]:
+    res = await session.execute(
+        select(AdminAction)
+        .order_by(AdminAction.created_at.desc(), AdminAction.id.desc())
+        .limit(max(min(limit, 100), 1))
+    )
+    return list(res.scalars().all())
 
 
 # ---------- Payments ----------

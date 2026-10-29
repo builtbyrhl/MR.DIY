@@ -10,7 +10,9 @@ from sqlalchemy.exc import IntegrityError
 from bot.db.repo import (
     add_db_admin,
     grant_premium,
+    list_admin_actions,
     list_db_admins,
+    record_admin_action,
     remove_db_admin,
 )
 from bot.services.auth import (
@@ -91,6 +93,7 @@ async def admin_panel(message: Message):
         "/stats\n"
         "/dashboard — student activity and watch stats\n"
         "/analytics [subject_slug] — views per lecture\n"
+        "/log [n] — recent admin actions\n"
         "/whereami\n\n"
         "🔐 Admins (private chat only):\n"
         "/admins\n"
@@ -612,6 +615,13 @@ async def addadmin_cmd(message: Message, session):
         await message.answer(error)
         return
     await load_db_admin_cache(session)
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "add_admin",
+        target_type="user",
+        target_id=user_id,
+    )
     await message.answer(
         f"Granted administrator access to {user_id}. "
         "They must start the bot and use /admin."
@@ -653,4 +663,42 @@ async def removeadmin_cmd(message: Message, session):
         await message.answer(error)
         return
     await load_db_admin_cache(session)
+    await record_admin_action(
+        session,
+        message.from_user.id,
+        "remove_admin",
+        target_type="user",
+        target_id=user_id,
+    )
     await message.answer(f"Removed administrator access from {user_id}.", parse_mode=None)
+
+
+@router.message(Command("log"))
+async def log_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    limit = 20
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(max(int(parts[1]), 1), 100)
+    actions = await list_admin_actions(session, limit)
+    if not actions:
+        await message.answer("No admin actions recorded yet.")
+        return
+    lines = ["📜 Admin activity (latest first)", ""]
+    for entry in actions:
+        target = ""
+        if entry.target_type:
+            target = f" {entry.target_type}"
+            if entry.target_id is not None:
+                target += f" #{entry.target_id}"
+        detail = f" — {entry.details}" if entry.details else ""
+        when = (
+            entry.created_at.strftime("%d %b %H:%M")
+            if entry.created_at
+            else "?"
+        )
+        lines.append(
+            f"{when} · {entry.admin_id} {entry.action}{target}{detail}"
+        )
+    await message.answer("\n".join(lines), parse_mode=None)

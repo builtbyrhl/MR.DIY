@@ -235,6 +235,11 @@ class Lecture(Base):
     channel_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # source channel msg
     duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_withdrawn: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    withdrawal_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -429,6 +434,8 @@ class UploadItem(Base):
     status: Mapped[str] = mapped_column(String(32), default="received")
     publication_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    published_chat_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    published_topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     duplicate_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     duplicate_of_item_id: Mapped[Optional[int]] = mapped_column(
@@ -440,6 +447,59 @@ class UploadItem(Base):
 
     batch: Mapped["UploadBatch"] = relationship(back_populates="items")
     institution: Mapped[Optional["Institution"]] = relationship()
+
+
+class RollbackOperation(Base):
+    """One previewed/confirmed withdrawal of lectures from the student library."""
+
+    __tablename__ = "rollback_operations"
+    __table_args__ = (Index("ix_rollback_operations_status", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger)
+    target_type: Mapped[str] = mapped_column(String(16))
+    target_id: Mapped[int] = mapped_column(Integer)
+    source_batch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    total_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class RollbackItem(Base):
+    """Snapshot and independent channel/catalogue result for one lecture."""
+
+    __tablename__ = "rollback_items"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "lecture_id", name="uq_rollback_item_lecture"),
+        Index("ix_rollback_items_lecture", "lecture_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    operation_id: Mapped[int] = mapped_column(
+        ForeignKey("rollback_operations.id", ondelete="CASCADE")
+    )
+    lecture_id: Mapped[int] = mapped_column(ForeignKey("lectures.id"))
+    upload_item_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("upload_items.id", ondelete="SET NULL"), nullable=True
+    )
+    target_chat_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    published_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    channel_status: Mapped[str] = mapped_column(
+        String(24), default="pending", server_default="pending"
+    )
+    channel_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    catalogue_status: Mapped[str] = mapped_column(
+        String(24), default="pending", server_default="pending"
+    )
+    catalogue_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class SystemSetting(Base):

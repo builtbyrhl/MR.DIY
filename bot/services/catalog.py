@@ -58,6 +58,8 @@ async def project_upload_to_lecture(
     The caller owns the transaction. The unique source link makes this
     idempotent even if publishing or startup backfill runs repeatedly.
     """
+    if item.publication_status == "withdrawn":
+        return None, False
     if item.publication_status != PUBLISHED and item.published_message_id is None:
         return None, False
     if item.course_id is None:
@@ -131,10 +133,11 @@ async def sync_published_uploads_to_catalog(session: AsyncSession) -> int:
     """Project all already-published uploads, including legacy publications."""
     result = await session.execute(
         select(UploadItem).where(
+            UploadItem.publication_status.is_not("withdrawn"),
             or_(
                 UploadItem.publication_status == PUBLISHED,
                 UploadItem.published_message_id.is_not(None),
-            )
+            ),
         )
     )
     created = 0

@@ -178,6 +178,8 @@ async def test_video_publishes_to_configured_forum_topic(session, seeded_course)
     await session.refresh(item)
     assert item.publication_status == "published"
     assert item.published_message_id == 501
+    assert item.published_chat_id == "-100123"
+    assert item.published_topic_id == 77
     assert item.error is None
 
 

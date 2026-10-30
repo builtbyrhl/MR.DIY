@@ -3,7 +3,13 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, F
-from aiogram.types import Message, ReplyParameters
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyParameters,
+)
 from aiogram.filters import Command
 from sqlalchemy.exc import IntegrityError
 
@@ -12,6 +18,7 @@ from bot.db.repo import (
     grant_premium,
     list_admin_actions,
     list_db_admins,
+    list_subjects,
     record_admin_action,
     remove_db_admin,
 )
@@ -22,6 +29,12 @@ from bot.services.auth import (
     is_owner,
     load_db_admin_cache,
     owner_ids,
+)
+from bot.services.subject_removal import (
+    SubjectDependencySummary,
+    delete_subject_if_unreferenced,
+    inspect_subject_for_removal,
+    list_subject_dependency_summaries,
 )
 
 router = Router()
@@ -40,6 +53,8 @@ async def admin_panel(message: Message):
         "🛠 Admin commands:\n\n"
         "📚 Catalogue:\n"
         "/addsubject <slug>|<name>|<emoji>\n"
+        "/removesubject <subject_id> - preview and delete an unused subject\n"
+        "/adminsubjects - read-only subject IDs, dependencies and safety\n"
         "/addlecture <subject_slug>|<title>|<channel_msg_id>|[premium]\n"
         "/reorder <subject_slug>\n\n"
         "👥 Student access:\n"
@@ -80,6 +95,8 @@ async def admin_panel(message: Message):
         "/createbatch <name> · /startbatch <id> · /activebatch · /finishbatch\n"
         "/moveitem <item_id>|<batch_id> · /moveitems <id,id,50-100,...>|<batch_id> — move uploaded items into a batch\n"
         "/publish <id>\n"
+        "/unpublish <lecture_id> - preview and confirm withdrawing a lecture\n"
+        "/unpublishbatch <batch_id> - preview and confirm withdrawing a published batch\n"
         "/batchops <id>|<report|approve|publish|ship|retry|skip> - bulk batch workflow\n"
         "/reconcilepublish <item>|<message>|<destination>|<topic> — if the message already exists\n"
         "/unlockpublish <item> — only if the message does not exist\n"
@@ -154,6 +171,184 @@ async def add_subject(message: Message, session):
         await message.answer(f"Subject '{slug}' already exists.")
         return
     await message.answer(f"Added subject {name}")
+
+
+REMOVE_SUBJECT_USAGE = (
+    "Usage: /removesubject <subject_id>\n"
+    "Shows the exact subject and linked records first. "
+    "Nothing changes until you press Confirm."
+)
+_MAX_DB_ID = 2_147_483_647
+
+
+def _positive_id(raw: str) -> int | None:
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    value = int(raw)
+    if value <= 0 or value > _MAX_DB_ID:
+        return None
+    return value
+
+
+def _subject_id_from_command(text: str | None) -> int | None:
+    parts = (text or "").split()
+    if len(parts) != 2:
+        return None
+    return _positive_id(parts[1])
+
+
+def _subject_callback_action(data: str | None) -> tuple[str | None, int | None]:
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != "removesubject":
+        return None, None
+    action = parts[1]
+    if action not in {"confirm", "cancel"}:
+        return None, None
+    return action, _positive_id(parts[2])
+
+
+def _subject_removal_keyboard(subject_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Confirm deletion",
+                    callback_data=f"removesubject:confirm:{subject_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Cancel",
+                    callback_data=f"removesubject:cancel:{subject_id}",
+                ),
+            ]
+        ]
+    )
+
+
+async def _answer_lines(message: Message, lines: list[str]) -> None:
+    chunk = ""
+    for line in lines:
+        candidate = f"{chunk}\n{line}" if chunk else line
+        if len(candidate) > 3800:
+            await message.answer(chunk, parse_mode=None)
+            chunk = line
+        else:
+            chunk = candidate
+    if chunk:
+        await message.answer(chunk, parse_mode=None)
+
+
+def _subject_removal_text(preview) -> str:
+    lines = [
+        "REMOVE SUBJECT PREVIEW - nothing has been changed yet.",
+        f"Subject #{preview.subject_id}: {preview.name}",
+        f"Slug: {preview.slug}",
+    ]
+    if preview.has_dependencies:
+        lines.append("Deletion refused. Linked records found:")
+        lines.extend(f"  {line}" for line in preview.reference_lines())
+        lines.append(
+            "Resolve these references first. No courses, lectures, uploads, "
+            "progress, bookmarks, Telegram messages or forum topics were changed."
+        )
+    else:
+        lines.append("Linked records: none")
+        lines.append("Safe to delete only this subject record.")
+        lines.append(
+            "No courses, lectures, uploads, progress, bookmarks, Telegram "
+            "messages or forum topics will be changed."
+        )
+    return "\n".join(lines)
+
+
+@router.message(Command("adminsubjects"))
+async def adminsubjects_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    subjects = await list_subjects(session)
+    summaries = await list_subject_dependency_summaries(session)
+    lines = [
+        "ADMIN SUBJECT INVENTORY (read-only).",
+        "ID | name | slug | dependencies | status",
+    ]
+    if subjects:
+        for subject in sorted(subjects, key=lambda item: item.id):
+            summary = summaries.get(subject.id, SubjectDependencySummary())
+            status = (
+                "BLOCKED - linked records"
+                if summary.has_dependencies
+                else "SAFE - no dependencies"
+            )
+            lines.append(
+                f"#{subject.id} | {subject.name} | {subject.slug} | "
+                f"{summary.counts_text()} | {status}"
+            )
+    else:
+        lines.append("No subjects found.")
+    await _answer_lines(message, lines)
+
+
+@router.message(Command("removesubject"))
+async def removesubject_cmd(message: Message, session):
+    if not is_admin(message.from_user.id):
+        return
+    subject_id = _subject_id_from_command(message.text)
+    if subject_id is None:
+        await message.answer(REMOVE_SUBJECT_USAGE, parse_mode=None)
+        return
+    preview, error = await inspect_subject_for_removal(session, subject_id)
+    if error or preview is None:
+        await message.answer(error or "Subject was not found.", parse_mode=None)
+        return
+    await message.answer(
+        _subject_removal_text(preview),
+        parse_mode=None,
+        reply_markup=(
+            None
+            if preview.has_dependencies
+            else _subject_removal_keyboard(subject_id)
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("removesubject:"))
+async def removesubject_callback(callback: CallbackQuery, session):
+    if not is_admin(callback.from_user.id):
+        return
+    action, subject_id = _subject_callback_action(callback.data)
+    if action is None or subject_id is None:
+        await callback.answer("Invalid subject confirmation.", show_alert=True)
+        return
+    if action == "cancel":
+        await callback.message.edit_text(
+            f"Deletion cancelled. Subject #{subject_id} was not changed.",
+            parse_mode=None,
+        )
+        await callback.answer("Cancelled.")
+        return
+
+    preview, error = await delete_subject_if_unreferenced(
+        session, subject_id, callback.from_user.id
+    )
+    if error or preview is None:
+        if preview is not None:
+            await callback.message.edit_text(
+                _subject_removal_text(preview), parse_mode=None
+            )
+        else:
+            await callback.message.edit_text(
+                error or "Subject was not deleted.", parse_mode=None
+            )
+        await callback.answer(error or "Subject was not deleted.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"Deleted subject #{preview.subject_id}: {preview.name} "
+        f"({preview.slug}).\n"
+        "No courses, lectures, uploads, progress, bookmarks, Telegram messages "
+        "or forum topics were changed.",
+        parse_mode=None,
+    )
+    await callback.answer("Subject deleted.")
 
 
 @router.message(Command("addlecture"))

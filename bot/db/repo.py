@@ -147,9 +147,9 @@ async def list_subject_lecture_counts(
     session: AsyncSession,
 ) -> dict[int, int]:
     res = await session.execute(
-        select(Lecture.subject_id, func.count(Lecture.id)).group_by(
-            Lecture.subject_id
-        )
+        select(Lecture.subject_id, func.count(Lecture.id))
+        .where(Lecture.is_withdrawn.is_not(True))
+        .group_by(Lecture.subject_id)
     )
     return {int(subject_id): int(count) for subject_id, count in res.all()}
 
@@ -665,6 +665,7 @@ async def list_subject_topic_groups(
         .where(
             Topic.subject_id == subject_id,
             Lecture.subject_id == subject_id,
+            Lecture.is_withdrawn.is_not(True),
         )
         .group_by(Topic.id, Topic.name)
         .order_by(func.lower(Topic.name), Topic.id)
@@ -698,6 +699,7 @@ async def list_teacher_topic_groups(
             Topic.subject_id == subject_id,
             Lecture.subject_id == subject_id,
             teacher_filter,
+            Lecture.is_withdrawn.is_not(True),
         )
         .group_by(Topic.id, Topic.name)
         .order_by(func.lower(Topic.name), Topic.id)
@@ -730,6 +732,7 @@ async def list_lectures_by_teacher_topic(
             Lecture.subject_id == subject_id,
             teacher_filter,
             lecture_topics.c.topic_id == topic_id,
+            Lecture.is_withdrawn.is_not(True),
         )
         .order_by(Lecture.order, Lecture.channel_message_id, Lecture.id)
     )
@@ -756,6 +759,7 @@ async def list_lectures_by_topic(
         .where(
             Lecture.subject_id == subject_id,
             lecture_topics.c.topic_id == topic_id,
+            Lecture.is_withdrawn.is_not(True),
         )
         .order_by(Lecture.order, Lecture.channel_message_id, Lecture.id)
     )
@@ -818,6 +822,7 @@ async def list_subject_teacher_groups(
         .where(
             Teacher.subject_id == subject_id,
             Lecture.subject_id == subject_id,
+            Lecture.is_withdrawn.is_not(True),
         )
         .group_by(Teacher.id, Teacher.name)
         .order_by(func.lower(Teacher.name), Teacher.id)
@@ -830,6 +835,7 @@ async def list_subject_teacher_groups(
         select(func.count(Lecture.id)).where(
             Lecture.subject_id == subject_id,
             Lecture.teacher_id.is_(None),
+            Lecture.is_withdrawn.is_not(True),
         )
     )
     if unspecified:
@@ -849,7 +855,10 @@ async def list_lectures_by_teacher(
     teacher_id: Optional[int],
     include_premium: bool = True,
 ) -> list[Lecture]:
-    q = select(Lecture).where(Lecture.subject_id == subject_id)
+    q = select(Lecture).where(
+        Lecture.subject_id == subject_id,
+        Lecture.is_withdrawn.is_not(True),
+    )
     if teacher_id is None:
         q = q.where(Lecture.teacher_id.is_(None))
     else:
@@ -928,7 +937,10 @@ async def set_lecture_teacher(
 
 # ---------- Lectures ----------
 async def list_lectures(session: AsyncSession, subject_id: int, include_premium: bool = True) -> list[Lecture]:
-    q = select(Lecture).where(Lecture.subject_id == subject_id).order_by(Lecture.order, Lecture.channel_message_id, Lecture.id)
+    q = select(Lecture).where(
+        Lecture.subject_id == subject_id,
+        Lecture.is_withdrawn.is_not(True),
+    ).order_by(Lecture.order, Lecture.channel_message_id, Lecture.id)
     if not include_premium:
         q = q.where(Lecture.is_premium.is_(False))
     res = await session.execute(q)
@@ -945,7 +957,8 @@ async def search_lectures(session: AsyncSession, query: str, limit: int = 20) ->
     q = f"%{query.lower()}%"
     res = await session.execute(
         select(Lecture).where(
-            (Lecture.title.ilike(q)) | (Lecture.tags.ilike(q)) | (Lecture.description.ilike(q))
+            Lecture.is_withdrawn.is_not(True),
+            (Lecture.title.ilike(q)) | (Lecture.tags.ilike(q)) | (Lecture.description.ilike(q)),
         ).order_by(Lecture.id.desc()).limit(limit)
     )
     lectures = list(res.scalars().all())
@@ -1042,12 +1055,20 @@ async def list_watched_lecture_ids(
 
 async def subject_progress(session: AsyncSession, user_id: int, subject_id: int) -> tuple[int, int]:
     total = await session.execute(
-        select(func.count(Lecture.id)).where(Lecture.subject_id == subject_id)
+        select(func.count(Lecture.id)).where(
+            Lecture.subject_id == subject_id,
+            Lecture.is_withdrawn.is_not(True),
+        )
     )
     t = total.scalar() or 0
     done = await session.execute(
         select(func.count(Progress.id)).join(Lecture, Lecture.id == Progress.lecture_id)
-        .where(Progress.user_id == user_id, Lecture.subject_id == subject_id, Progress.watched.is_(True))
+        .where(
+            Progress.user_id == user_id,
+            Lecture.subject_id == subject_id,
+            Progress.watched.is_(True),
+            Lecture.is_withdrawn.is_not(True),
+        )
     )
     d = done.scalar() or 0
     return d, t
@@ -1056,7 +1077,11 @@ async def subject_progress(session: AsyncSession, user_id: int, subject_id: int)
 async def last_watched_lecture(session: AsyncSession, user_id: int) -> Optional[Lecture]:
     res = await session.execute(
         select(Lecture).join(Progress, Progress.lecture_id == Lecture.id)
-        .where(Progress.user_id == user_id, Progress.watched.is_(True))
+        .where(
+            Progress.user_id == user_id,
+            Progress.watched.is_(True),
+            Lecture.is_withdrawn.is_not(True),
+        )
         .order_by(Progress.watched_at.desc()).limit(1)
     )
     return res.scalar_one_or_none()
@@ -1071,6 +1096,7 @@ async def next_lecture_in_subject(
             Lecture.subject_id == lecture.subject_id,
             Lecture.order > (lecture.order or 0),
             Lecture.id != lecture.id,
+            Lecture.is_withdrawn.is_not(True),
         )
         .order_by(Lecture.order, Lecture.id)
         .limit(1)
@@ -1099,7 +1125,11 @@ async def remove_bookmark(session: AsyncSession, user_id: int, lecture_id: int):
 async def list_bookmarks(session: AsyncSession, user_id: int) -> list[Lecture]:
     res = await session.execute(
         select(Lecture).join(Bookmark, Bookmark.lecture_id == Lecture.id)
-        .where(Bookmark.user_id == user_id).order_by(Bookmark.created_at.desc())
+        .where(
+            Bookmark.user_id == user_id,
+            Lecture.is_withdrawn.is_not(True),
+        )
+        .order_by(Bookmark.created_at.desc())
     )
     return list(res.scalars().all())
 
@@ -1217,7 +1247,10 @@ async def first_lecture_in_subject(
     subject_id: int,
     include_premium: bool = True,
 ) -> Optional[Lecture]:
-    stmt = select(Lecture).where(Lecture.subject_id == subject_id)
+    stmt = select(Lecture).where(
+        Lecture.subject_id == subject_id,
+        Lecture.is_withdrawn.is_not(True),
+    )
     if not include_premium:
         stmt = stmt.where(Lecture.is_premium.is_(False))
     res = await session.execute(
@@ -1240,7 +1273,11 @@ async def up_next_lectures(
     stmt = (
         select(Lecture, Subject)
         .join(Subject, Subject.id == Lecture.subject_id)
-        .where(Lecture.subject_id.in_(started), Lecture.id.notin_(watched))
+        .where(
+            Lecture.subject_id.in_(started),
+            Lecture.id.notin_(watched),
+            Lecture.is_withdrawn.is_not(True),
+        )
         .order_by(Subject.order, Lecture.order, Lecture.id)
     )
     if not include_premium:
@@ -1270,6 +1307,7 @@ async def recent_watch_history(
             Progress.user_id == user_id,
             Progress.watched.is_(True),
             Progress.watched_at.is_not(None),
+            Lecture.is_withdrawn.is_not(True),
         )
         .order_by(Progress.watched_at.desc())
         .limit(max(limit, 0))

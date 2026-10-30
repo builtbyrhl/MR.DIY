@@ -73,11 +73,19 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
         has_student_media = await connection.run_sync(
             lambda conn: inspect(conn).has_table("student_media_messages")
         )
+        has_rollback_operations = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("rollback_operations")
+        )
+        has_rollback_items = await connection.run_sync(
+            lambda conn: inspect(conn).has_table("rollback_items")
+        )
 
     assert {
         "file_id",
         "publication_status",
         "published_message_id",
+        "published_chat_id",
+        "published_topic_id",
         "teacher_id",
         "teacher_source",
         "teacher_review_reason",
@@ -91,9 +99,56 @@ async def test_startup_migration_adds_publishing_columns_without_data_loss(
     assert has_teacher_aliases is True
     assert has_admin_users is True
     assert has_student_media is True
+    assert has_rollback_operations is True
+    assert has_rollback_items is True
     assert row.id == 1
     assert row.file_unique_id == "existing-unique-id"
     assert row.status == "classified"
+
+    await engine.dispose()
+
+
+async def test_lecture_migration_adds_withdrawal_columns_and_backfills(
+    tmp_path,
+):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/legacy-lectures.db")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE lectures (
+                    id INTEGER PRIMARY KEY,
+                    subject_id INTEGER NOT NULL,
+                    title VARCHAR(256) NOT NULL
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO lectures (id, subject_id, title) "
+                "VALUES (1, 2, 'Legacy lecture')"
+            )
+        )
+        await connection.run_sync(db_session.ensure_lecture_columns)
+        await connection.run_sync(db_session.ensure_lecture_columns)
+        columns = await connection.run_sync(
+            lambda conn: {
+                column["name"]
+                for column in inspect(conn).get_columns("lectures")
+            }
+        )
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT title, is_withdrawn FROM lectures WHERE id = 1"
+                )
+            )
+        ).one()
+
+    assert {"is_withdrawn", "withdrawal_status", "withdrawn_at"} <= columns
+    assert row.title == "Legacy lecture"
+    assert row.is_withdrawn in (False, 0)
 
     await engine.dispose()
 

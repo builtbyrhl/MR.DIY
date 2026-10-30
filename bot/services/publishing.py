@@ -31,6 +31,7 @@ CAPTION_LIMIT = 1024
 
 PUBLISHED = "published"
 PUBLISHING = "publishing"
+WITHDRAWN = "withdrawn"
 ALREADY_PUBLISHED = "already_published"
 SKIPPED = "skipped"
 FAILED = "failed"
@@ -180,6 +181,8 @@ async def _sync_student_catalog(
     session: AsyncSession, item: UploadItem, bot: Bot | None = None
 ) -> None:
     """Best-effort projection; sending already succeeded at this point."""
+    if item.publication_status == WITHDRAWN:
+        return
     item_id = item.id
     try:
         lecture, created = await project_upload_to_lecture(session, item)
@@ -201,6 +204,13 @@ async def _publish_item(
             item_id=item.id,
             status=SKIPPED,
             reason="item is marked skipped",
+        )
+
+    if item.publication_status == WITHDRAWN:
+        return PublishResult(
+            item_id=item.id,
+            status=FAILED,
+            reason="item was withdrawn; it cannot be republished.",
         )
 
     if item.publication_status == PUBLISHED or item.published_message_id is not None:
@@ -335,6 +345,8 @@ async def _publish_item(
 
     item.publication_status = PUBLISHED
     item.published_message_id = message_id
+    item.published_chat_id = str(destination)
+    item.published_topic_id = course.topic_id
     item.error = None
     await session.commit()
     await _sync_student_catalog(session, item, bot)
@@ -354,6 +366,12 @@ async def publish_item(
             item_id=item_id,
             status=FAILED,
             reason="Item not found.",
+        )
+    if item.publication_status == WITHDRAWN:
+        return PublishResult(
+            item_id=item.id,
+            status=FAILED,
+            reason="item was withdrawn; it cannot be republished.",
         )
 
     batch = await session.get(UploadBatch, item.batch_id)
@@ -461,6 +479,8 @@ async def reconcile_publish_state(
             .values(
                 publication_status=PUBLISHED,
                 published_message_id=message_id,
+                published_chat_id=str(destination),
+                published_topic_id=topic_id,
                 error=None,
             )
         )

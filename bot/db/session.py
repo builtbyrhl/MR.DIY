@@ -17,6 +17,8 @@ _UPLOAD_ITEM_NEW_COLUMNS = (
     ("file_id", String(256)),
     ("publication_status", String(32)),
     ("published_message_id", BigInteger()),
+    ("published_chat_id", String(128)),
+    ("published_topic_id", Integer()),
     ("teacher_id", Integer()),
     ("teacher_source", String(16)),
     ("teacher_review_reason", Text()),
@@ -190,6 +192,28 @@ def ensure_lecture_columns(connection) -> None:
         connection.execute(
             text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
         )
+    for name, column_type in (
+        ("is_withdrawn", Boolean()),
+        ("withdrawal_status", String(16)),
+        ("withdrawn_at", DateTime()),
+    ):
+        if name in existing:
+            continue
+        definition = str(
+            CreateColumn(Column(name, column_type, nullable=True)).compile(
+                dialect=connection.dialect
+            )
+        )
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{definition}")
+        )
+    connection.execute(
+        text(
+            f"UPDATE {table} SET is_withdrawn = :value "
+            "WHERE is_withdrawn IS NULL"
+        ),
+        {"value": False},
+    )
 
     index = connection.dialect.identifier_preparer.quote(
         _LECTURE_SOURCE_UPLOAD_INDEX

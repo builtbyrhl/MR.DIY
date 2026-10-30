@@ -465,7 +465,10 @@ async def _institution_subjects(session, institution_id: int):
     stmt = (
         select(Subject, func.count(Lecture.id))
         .join(Lecture, Lecture.subject_id == Subject.id)
-        .where(Lecture.institution_id == institution_id)
+        .where(
+            Lecture.institution_id == institution_id,
+            Lecture.is_withdrawn.is_not(True),
+        )
         .group_by(Subject.id)
         .order_by(Subject.name)
     )

@@ -122,6 +122,9 @@ async def open_lecture(cb: CallbackQuery, session, db_user, bot):
     if not lec:
         await cb.answer("Not found", show_alert=True)
         return
+    if lec.is_withdrawn:
+        await cb.answer("This lecture has been withdrawn.", show_alert=True)
+        return
     await decorate_lecture_titles(session, [lec])
     back_callback = _callback_back(lec, cb.data)
     _lecture_back_callbacks[db_user.id] = back_callback
@@ -171,6 +174,9 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
     lec = await get_lecture(session, lid)
     if not lec:
         await cb.answer("Media not available", show_alert=True)
+        return
+    if lec.is_withdrawn:
+        await cb.answer("This lecture has been withdrawn.", show_alert=True)
         return
 
     premium = await is_premium(db_user)
@@ -288,6 +294,10 @@ async def watch_lecture(cb: CallbackQuery, session, db_user, bot):
 @router.callback_query(F.data.startswith("done:"))
 async def mark_done(cb: CallbackQuery, session, db_user):
     lid = int(cb.data.split(":")[1])
+    lec = await get_lecture(session, lid)
+    if lec is None or lec.is_withdrawn:
+        await cb.answer("Lecture not available", show_alert=True)
+        return
     await mark_watched(session, db_user.id, lid)
     await cb.answer("Marked as watched ✅")
 

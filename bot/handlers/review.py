@@ -11,7 +11,12 @@ from aiogram.exceptions import (
     TelegramForbiddenError,
 )
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot.db.ingestion_repo import (
     approve_batch,
@@ -38,7 +43,7 @@ from bot.db.ingestion_repo import (
     upsert_course,
 )
 from bot.config import get_settings
-from bot.db.models import Teacher, UploadItem
+from bot.db.models import Lecture, Teacher, UploadItem
 from bot.db.repo import (
     add_teacher,
     add_teacher_alias,
@@ -76,6 +81,17 @@ from bot.services.publishing import (
     reconcile_publish_state,
     unlock_publish_state,
 )
+from bot.services.rollback import (
+    CATALOGUE_ALREADY_WITHDRAWN,
+    CATALOGUE_WITHDRAWN,
+    CHANNEL_ALREADY_DELETED,
+    CHANNEL_DELETED,
+    CHANNEL_NOT_LINKED,
+    create_preview,
+    cancel_operation,
+    execute_operation,
+    get_operation_items,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -91,6 +107,13 @@ def _authorized(message: Message) -> bool:
     except PermissionError:
         return False
 
+
+def _callback_authorized(callback: CallbackQuery) -> bool:
+    try:
+        require_admin(callback.from_user.id)
+        return True
+    except PermissionError:
+        return False
 
 
 async def _reply_lines(message: Message, lines: list[str]) -> None:
@@ -689,6 +712,16 @@ def _item_ids(raw: str) -> tuple[Optional[list[int]], Optional[str]]:
     return _int_list(raw)
 
 
+def _publication_category(item) -> str:
+    status = getattr(item, "publication_status", None)
+    message_id = getattr(item, "published_message_id", None)
+    if status == "withdrawn":
+        return "withdrawn"
+    if status == "published" or message_id is not None:
+        return "published"
+    return "unpublished"
+
+
 def _item_line(item) -> str:
     number = f"L{item.lecture_number}" if item.lecture_number is not None else "L?"
     flags = []
@@ -702,7 +735,11 @@ def _item_line(item) -> str:
     ):
         flags.append(item.teacher_review_reason)
     suffix = f" | {'; '.join(flags)}" if flags else ""
-    return f"#{item.id} [{item.status}] {number} {item.title or 'Untitled'}{suffix}"
+    publication = _publication_category(item)
+    return (
+        f"#{item.id} [{item.status}/{publication}] {number} "
+        f"{item.title or 'Untitled'}{suffix}"
+    )
 
 
 async def _course_line(session, item) -> str:
@@ -807,11 +844,13 @@ UNRESOLVED_STATUSES = {"received", "needs_review", "failed", "paused"}
 
 def _batch_summary(batch, items) -> list[str]:
     unresolved = [i for i in items if i.status in UNRESOLVED_STATUSES]
+    withdrawn = [i for i in items if i.publication_status == "withdrawn"]
     published = [
         i for i in items
-        if i.publication_status == "published"
-        or i.published_message_id is not None
+        if (i.publication_status == "published" or i.published_message_id is not None)
+        and i not in withdrawn
     ]
+    unpublished = [i for i in items if i not in published and i not in withdrawn]
     failed_publish = [
         i for i in items
         if i.publication_status == "failed" and i not in published
@@ -826,16 +865,18 @@ def _batch_summary(batch, items) -> list[str]:
         if i not in unresolved
         and i not in skipped
         and i not in published
+        and i not in withdrawn
         and i not in failed_publish
         and i not in in_flight
     ]
     lines = [
-        f"Batch #{batch.id} · {batch.name or 'unnamed'} · {batch.status} "
-        f"· {len(items)} item(s)",
-        f"Ready: {len(ready)} · Published: {len(published)} "
-        f"· Skipped: {len(skipped)}",
-        f"Unresolved: {len(unresolved)} · Publish failures: {len(failed_publish)} "
-        f"· In flight: {len(in_flight)}",
+        f"Batch #{batch.id} | {batch.name or 'unnamed'} | {batch.status} "
+        f"| {len(items)} item(s)",
+        f"Ready: {len(ready)} | Published: {len(published)} "
+        f"| Withdrawn: {len(withdrawn)} | Skipped: {len(skipped)}",
+        f"Unpublished/unapproved: {len(unpublished)} | "
+        f"Unresolved: {len(unresolved)} | Publish failures: {len(failed_publish)} "
+        f"| In flight: {len(in_flight)}",
     ]
     if unresolved:
         ids = ", ".join(f"#{i.id}" for i in unresolved[:10])
@@ -1787,6 +1828,223 @@ async def publish_cmd(message: Message, session, bot: Bot):
     for failure in result.failures:
         lines.append(f"#{failure.item_id}: {failure.reason}")
     await _reply_lines(message, lines)
+
+
+UNPUBLISH_USAGE = (
+    "Usage: /unpublish <lecture_id>\n"
+    "       /unpublishbatch <batch_id>\n"
+    "Nothing changes until you press Confirm."
+)
+
+
+def _unpublish_keyboard(operation_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Confirm unpublish",
+                    callback_data=f"unpublish:confirm:{operation_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Cancel",
+                    callback_data=f"unpublish:cancel:{operation_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def _unpublish_target(item) -> str:
+    target = item.target_chat_id or "target not recorded"
+    message = (
+        str(item.published_message_id)
+        if item.published_message_id is not None
+        else "message not recorded"
+    )
+    return f"{target} / message {message}"
+
+
+async def _unpublish_preview_lines(session, preview) -> list[str]:
+    operation = preview.operation
+    items = preview.items
+    if operation.target_type == "lecture":
+        lecture = await session.get(Lecture, operation.target_id)
+        heading = (
+            f"Unpublish lecture #{operation.target_id} - "
+            f"{lecture.title if lecture else 'missing lecture'}"
+        )
+    else:
+        heading = f"Unpublish batch #{operation.target_id}"
+    lines = [
+        "UNPUBLISH PREVIEW - nothing has been changed yet.",
+        heading,
+        f"Lectures: {len(items)}",
+    ]
+    for item in items[:20]:
+        lecture = await session.get(Lecture, item.lecture_id)
+        title = lecture.title if lecture else "missing lecture"
+        lines.append(
+            f"  #{item.lecture_id} {title} -> {_unpublish_target(item)}"
+        )
+    if len(items) > 20:
+        lines.append(f"  ... and {len(items) - 20} more")
+    if preview.skipped_withdrawn:
+        lines.append(f"Already withdrawn and skipped: {preview.skipped_withdrawn}")
+    if preview.skipped_unprojected:
+        lines.append(
+            f"Uploads without a student lecture and skipped: {preview.skipped_unprojected}"
+        )
+    lines.append(
+        "Confirm deletes the recorded channel message(s) and hides the "
+        "lecture(s) from students. Lecture records, progress and bookmarks are kept."
+    )
+    return lines
+
+
+async def _show_unpublish_preview(message: Message, session, preview) -> None:
+    await message.answer(
+        "\n".join(await _unpublish_preview_lines(session, preview)),
+        reply_markup=_unpublish_keyboard(preview.operation.id),
+        parse_mode=None,
+    )
+
+
+@router.message(Command("unpublish"))
+async def unpublish_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/unpublish")
+    if not args:
+        await message.answer(UNPUBLISH_USAGE, parse_mode=None)
+        return
+    lecture_id = _positive_ascii_id(args[0])
+    if lecture_id is None:
+        await message.answer(
+            "Lecture ID must be a positive number.\n\n" + UNPUBLISH_USAGE,
+            parse_mode=None,
+        )
+        return
+    preview, error = await create_preview(
+        session, message.from_user.id, lecture_id=lecture_id
+    )
+    if error or preview is None:
+        await message.answer(error or "Could not prepare unpublish preview.")
+        return
+    await _show_unpublish_preview(message, session, preview)
+
+
+@router.message(Command("unpublishbatch"))
+async def unpublishbatch_cmd(message: Message, session):
+    if not _authorized(message):
+        return
+    args = _args(message, "/unpublishbatch")
+    if not args:
+        await message.answer(UNPUBLISH_USAGE, parse_mode=None)
+        return
+    batch_id = _positive_ascii_id(args[0])
+    if batch_id is None:
+        await message.answer(
+            "Batch ID must be a positive number.\n\n" + UNPUBLISH_USAGE,
+            parse_mode=None,
+        )
+        return
+    preview, error = await create_preview(
+        session, message.from_user.id, batch_id=batch_id
+    )
+    if error or preview is None:
+        await message.answer(error or "Could not prepare unpublish preview.")
+        return
+    await _show_unpublish_preview(message, session, preview)
+
+
+def _unpublish_result_lines(operation, items) -> list[str]:
+    channel_deleted = sum(
+        item.channel_status in {CHANNEL_DELETED, CHANNEL_ALREADY_DELETED}
+        for item in items
+    )
+    channel_not_linked = sum(
+        item.channel_status == CHANNEL_NOT_LINKED for item in items
+    )
+    channel_failed = [
+        item for item in items if item.channel_status == "failed"
+    ]
+    catalogue_withdrawn = sum(
+        item.catalogue_status in {CATALOGUE_WITHDRAWN, CATALOGUE_ALREADY_WITHDRAWN}
+        for item in items
+    )
+    catalogue_failed = [
+        item for item in items if item.catalogue_status == "failed"
+    ]
+    lines = [
+        f"Unpublish operation #{operation.id}: {operation.status}",
+        f"Channel messages deleted/already gone: {channel_deleted}, "
+        f"not linked: {channel_not_linked}, failed: {len(channel_failed)}",
+        f"Catalogue lectures withdrawn: {catalogue_withdrawn}, "
+        f"failed: {len(catalogue_failed)}",
+    ]
+    for item in channel_failed:
+        lines.append(
+            f"  Lecture #{item.lecture_id} channel failed: "
+            f"{item.channel_error or 'unknown error'}"
+        )
+    for item in catalogue_failed:
+        lines.append(
+            f"  Lecture #{item.lecture_id} catalogue failed: "
+            f"{item.catalogue_error or 'unknown error'}"
+        )
+    if operation.status in {"partial", "failed"}:
+        lines.append(
+            "Retry the same target to finish only the failed parts. "
+            "Successful deletions and withdrawals are not repeated."
+        )
+    return lines
+
+
+@router.callback_query(lambda callback: (callback.data or "").startswith("unpublish:"))
+async def unpublish_callback(callback: CallbackQuery, session, bot: Bot):
+    if not _callback_authorized(callback):
+        await callback.answer("Admin only.", show_alert=True)
+        return
+    try:
+        action, raw_id = callback.data.split(":")[1:]
+        operation_id = int(raw_id)
+    except (AttributeError, ValueError):
+        await callback.answer("Invalid unpublish action.", show_alert=True)
+        return
+    if action == "cancel":
+        cancelled = await cancel_operation(session, operation_id, callback.from_user.id)
+        text = (
+            "Unpublish cancelled. Nothing was changed."
+            if cancelled
+            else "This preview is no longer pending; nothing was changed."
+        )
+        await callback.answer(text)
+        if callback.message is not None:
+            try:
+                await callback.message.edit_text(text, reply_markup=None, parse_mode=None)
+            except TelegramBadRequest:
+                await callback.message.answer(text, parse_mode=None)
+        return
+    if action != "confirm":
+        await callback.answer("Invalid unpublish action.", show_alert=True)
+        return
+
+    await callback.answer("Unpublishing...")
+    operation, error = await execute_operation(
+        session, bot, operation_id, callback.from_user.id
+    )
+    if operation is None:
+        text = error or "Unpublish preview not found."
+    else:
+        items = await get_operation_items(session, operation_id)
+        text = "\n".join(_unpublish_result_lines(operation, items))
+        if error:
+            text = f"{error}\n{text}"
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text(text, reply_markup=None, parse_mode=None)
+        except TelegramBadRequest:
+            await callback.message.answer(text, parse_mode=None)
 
 
 @router.message(Command("unlockpublish"))

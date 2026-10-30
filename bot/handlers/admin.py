@@ -70,7 +70,7 @@ async def admin_panel(message: Message):
         "/topics <subject_slug>\n"
         "/settopic <item_ids>|<topic_ids|none>\n"
         "/setlecturetopic <lecture_id>|<topic_ids|none>\n"
-        "/assign <item_ids>|<course|->|<topics|none|->|<teacher|none|->\n"
+        "/assign <item_ids>|<course|->|<topics|none|->|<teacher|none|-> — IDs: 12,13 · range: 120-126 · mixed: 164,120-126,130\n"
         "/videoid — reply to an inventory video to show its upload-item ID\n"
         "/setcaption <item_id>|<caption> — reclassify an unapproved item\n"
         "/review\n"

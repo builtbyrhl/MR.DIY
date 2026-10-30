@@ -2258,13 +2258,19 @@ async def assign_cmd(message: Message, session):
     if len(parts) < 4:
         await message.answer(
             "Usage: /assign <item_ids>|<course_id|->|<topic_ids|none|->|<teacher_id|none|->\n"
-            "Example: /assign 12,13|4|1,2|8\n"
+            "Examples:\n"
+            "  /assign 164,120,121,122|4|1,2|8\n"
+            "  /assign 120-126|4|1,2|8\n"
+            "  /assign 164,120-126,130,135-138|4|none|8\n"
             "Use - to leave a field unchanged."
         , parse_mode=None)
         return
-    item_ids, error = _item_ids(parts[0])
+    item_ids, error = _parse_item_ids(parts[0])
     if error:
         await message.answer(error)
+        return
+    if any(item_id < 1 or item_id > _MAX_DB_ID for item_id in item_ids):
+        await message.answer("Invalid item IDs: values must be positive numbers.")
         return
 
     course_raw = parts[1]

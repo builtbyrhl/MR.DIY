@@ -842,6 +842,116 @@ async def test_assign_rolls_back_every_item_when_any_item_fails(
     ]
 
 
+async def _assign_items(session, cat, item_ids, *, course="-", topics="none"):
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text=f"/assign {item_ids}|{course}|{topics}|{cat.teacher.id}",
+        answer=AsyncMock(),
+    )
+    await review.assign_cmd(message, session)
+    return message
+
+
+async def test_assign_accepts_individual_item_ids(session, topic_catalogue):
+    cat = topic_catalogue
+    items = [
+        await _ingest(session, 30 + index, f"Anatomy | Skull | Lecture {index + 1}")
+        for index in range(4)
+    ]
+
+    message = await _assign_items(
+        session,
+        cat,
+        ",".join(str(item.id) for item in items),
+    )
+
+    lines = message.answer.await_args.args[0].splitlines()
+    assert len(lines) == 4
+    for item in items:
+        await session.refresh(item)
+        assert item.teacher_id == cat.teacher.id
+
+
+async def test_assign_accepts_item_id_range(session, topic_catalogue):
+    cat = topic_catalogue
+    items = [
+        await _ingest(session, 40 + index, f"Anatomy | Skull | Lecture {index + 1}")
+        for index in range(7)
+    ]
+    first_id, last_id = items[0].id, items[-1].id
+    assert [item.id for item in items] == list(range(first_id, last_id + 1))
+
+    message = await _assign_items(session, cat, f"{first_id}-{last_id}")
+
+    lines = message.answer.await_args.args[0].splitlines()
+    assert len(lines) == len(items)
+    for item in items:
+        await session.refresh(item)
+        assert item.teacher_id == cat.teacher.id
+
+
+async def test_assign_accepts_mixed_ids_ranges_spaces_and_duplicates(
+    session, topic_catalogue
+):
+    cat = topic_catalogue
+    items = [
+        await _ingest(session, 50 + index, f"Anatomy | Skull | Lecture {index + 1}")
+        for index in range(10)
+    ]
+    selected = [9, 0, 1, 2, 4, 6, 7, 8]
+
+    message = await _assign_items(
+        session,
+        cat,
+        (
+            f"{items[9].id}, {items[0].id}-{items[2].id} , "
+            f"{items[4].id}, {items[6].id}-{items[8].id}, {items[1].id}"
+        ),
+    )
+
+    lines = message.answer.await_args.args[0].splitlines()
+    assert len(lines) == len(selected)
+    for index, item in enumerate(items):
+        await session.refresh(item)
+        if index in selected:
+            assert item.teacher_id == cat.teacher.id
+        else:
+            assert item.teacher_id is None
+
+
+@pytest.mark.parametrize(
+    "item_ids",
+    ["abc", "10-", "5-1", "1-2-3", "1..3", "0", "2147483648"],
+)
+async def test_assign_rejects_invalid_ranges_and_malformed_ids(
+    session, topic_catalogue, item_ids
+):
+    cat = topic_catalogue
+    item = await _ingest(session, 60, "Anatomy | Skull | Lecture 1")
+
+    message = await _assign_items(session, cat, item_ids)
+
+    answer = message.answer.await_args.args[0]
+    assert "Invalid" in answer
+    await session.refresh(item)
+    assert item.teacher_id is None
+
+
+async def test_assign_usage_lists_individual_range_and_mixed_examples():
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=123),
+        text="/assign",
+        answer=AsyncMock(),
+    )
+
+    await review.assign_cmd(message, None)
+
+    answer = message.answer.await_args.args[0]
+    assert "/assign 164,120,121,122|" in answer
+    assert "/assign 120-126|" in answer
+    assert "/assign 164,120-126,130,135-138|" in answer
+
+
 def test_pipe_preferred_caption_parsing_supports_current_layout():
     parsed = parse_caption(
         "Anatomy | Dr Mohammad Azam Sir | Neuroanatomy | Introduction",

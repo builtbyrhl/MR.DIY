@@ -5,15 +5,26 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Router
 from aiogram.types import ChatMemberUpdated
-from aiogram.filters import ChatMemberUpdatedFilter, MEMBER, RESTRICTED
+from aiogram.filters import ChatMemberUpdatedFilter, MEMBER
 
 from bot.config import get_settings
+from bot.utils.telegram import chat_matches
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 STALE_JOIN_AFTER = timedelta(minutes=10)
+
+
+def is_configured_chat(chat, settings=None) -> bool:
+    settings = settings or get_settings()
+    targets = {
+        settings.onboarding_channel_id,
+        settings.channel_id,
+        settings.access_group_id,
+    }
+    return any(chat_matches(target, chat) for target in targets if target)
 
 
 def is_stale_join(event: ChatMemberUpdated, now: datetime | None = None) -> bool:
@@ -36,10 +47,11 @@ async def on_new_member(event: ChatMemberUpdated):
         )
         return
     settings = get_settings()
-    # only handle configured channel
-    if settings.channel_id and str(event.chat.id) != str(settings.channel_id) and str(event.chat.username) != settings.channel_id.lstrip("@"):
-        # allow if channel_id matches username/id loosely
-        pass
+    if not is_configured_chat(event.chat, settings):
+        logger.debug(
+            "Skipping welcome for unconfigured chat %s", event.chat.id
+        )
+        return
     user = event.new_chat_member.user
     if user.is_bot:
         return

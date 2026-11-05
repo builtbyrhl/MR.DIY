@@ -62,7 +62,10 @@ def _is_callback(event: TelegramObject) -> bool:
 
 
 def _is_access_exempt(event: TelegramObject) -> bool:
-    if _is_callback(event) and getattr(event, "data", None) == "request_access":
+    if _is_callback(event) and getattr(event, "data", None) in {
+        "request_access",
+        "onboarding:verify",
+    }:
         return True
 
     chat = _event_chat(event)

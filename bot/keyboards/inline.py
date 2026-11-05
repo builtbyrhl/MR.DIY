@@ -36,6 +36,80 @@ def request_access_kb(pending: bool = False) -> InlineKeyboardMarkup:
     )
 
 
+def onboarding_kb(
+    channel_url: str = "",
+    *,
+    verified: bool = False,
+    pending: bool = False,
+) -> InlineKeyboardMarkup:
+    rows = []
+    if channel_url and not verified:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📢 Join Official Channel", url=channel_url
+                )
+            ]
+        )
+    if pending:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Refresh status",
+                    callback_data="onboarding:verify",
+                )
+            ]
+        )
+    elif verified:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔓 Request Access",
+                    callback_data="request_access",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Verify Membership",
+                    callback_data="onboarding:verify",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def access_group_kb(
+    link: str | None = None, *, retry: bool = False
+) -> InlineKeyboardMarkup:
+    if link:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔗 Join private group", url=link
+                    )
+                ]
+            ]
+        )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=(
+                        "🔁 Retry invitation"
+                        if retry
+                        else "🔗 Get private group invite"
+                    ),
+                    callback_data="access:invite",
+                )
+            ]
+        ]
+    )
+
+
 def access_review_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

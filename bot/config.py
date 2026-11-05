@@ -20,6 +20,12 @@ class Settings:
     channel_id: str = field(default_factory=lambda: os.getenv("CHANNEL_ID", ""))  # source channel for lectures
     upload_inbox_chat_id: str = field(default_factory=lambda: os.getenv("UPLOAD_INBOX_CHAT_ID", ""))
     destination_group_id: str = field(default_factory=lambda: os.getenv("DESTINATION_GROUP_ID", ""))
+    onboarding_channel_id: str = field(default_factory=lambda: os.getenv("ONBOARDING_CHANNEL_ID", ""))
+    onboarding_channel_url: str = field(default_factory=lambda: os.getenv("ONBOARDING_CHANNEL_URL", ""))
+    access_group_id: str = field(default_factory=lambda: (
+        os.getenv("ACCESS_GROUP_ID") or os.getenv("DESTINATION_GROUP_ID", "")
+    ))
+    access_invite_ttl_minutes: int = field(default_factory=lambda: int(os.getenv("ACCESS_INVITE_TTL_MINUTES", "10")))
     webhook_url: str = field(default_factory=lambda: os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", ""))
     webhook_secret: str = field(default_factory=lambda: os.getenv("WEBHOOK_SECRET", "secret"))
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))

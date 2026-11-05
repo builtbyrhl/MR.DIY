@@ -20,6 +20,7 @@ from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.services.auth import all_admin_ids, load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
 from bot.services.media_delivery import start_media_cleanup
+from bot.services.onboarding import onboarding_config_errors
 from bot.services.reminders import digest_loop, reminder_loop
 
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, access, admin, channel, review, ingest
@@ -103,6 +104,14 @@ async def on_startup(bot: Bot):
         logger.exception("Failed to load admin cache")
         raise
     logger.info("Admin cache loaded (%s database admins)", len(admin_ids))
+    missing_onboarding = onboarding_config_errors()
+    if missing_onboarding:
+        logger.warning(
+            "Onboarding configuration incomplete; missing %s",
+            ", ".join(missing_onboarding),
+        )
+    else:
+        logger.info("Onboarding configuration loaded")
 
 
 async def sync_catalogue_background() -> None:

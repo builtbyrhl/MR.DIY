@@ -11,8 +11,12 @@ from aiogram.types import (
     Message,
 )
 
-from bot.keyboards.inline import access_review_kb, request_access_kb
-from bot.keyboards.reply import main_menu_kb
+from bot.config import get_settings
+from bot.keyboards.inline import (
+    access_group_kb,
+    access_review_kb,
+    request_access_kb,
+)
 from bot.services.access import (
     APPROVED,
     PENDING,
@@ -33,7 +37,12 @@ from bot.services.access import (
 )
 from bot.services.auth import is_admin
 from bot.services.media_delivery import retention_hours
+from bot.services.onboarding import (
+    check_channel_membership,
+    create_access_invite,
+)
 
+from bot.db.models import User
 from bot.db.repo import record_admin_action
 
 router = Router()
@@ -108,16 +117,25 @@ async def _notify_decision(
     bot, user, *, approved: bool, revoked: bool = False
 ) -> bool:
     if approved:
-        text = (
-            "✅ Your library access has been approved.\n\n"
-            "Open the menu below to start studying."
-        )
+        text = "✅ Your library access has been approved.\n\n"
         expires = access_expires_at(user)
         if expires is not None:
             text += (
-                f"\n\nAccess is valid until {format_access_expiry(expires)}."
+                f"Access is valid until {format_access_expiry(expires)}.\n\n"
             )
-        markup = main_menu_kb()
+        invite = await create_access_invite(bot, user.id)
+        if invite.link:
+            text += (
+                "Use the single-use invite below to join the private "
+                "student group."
+            )
+            markup = access_group_kb(invite.link)
+        else:
+            text += (
+                "The private group invitation could not be created right "
+                "now. Access is still approved; use /myaccess to retry."
+            )
+            markup = access_group_kb(retry=True)
     elif revoked:
         text = "❌ Your library access has been revoked by an admin."
         markup = None
@@ -180,6 +198,8 @@ async def approve_user_cmd(message: Message, session, bot):
     if user_id is None:
         await message.answer("Usage: /approveuser <user_id> [days]", parse_mode=None)
         return
+    existing = await session.get(User, user_id)
+    was_active = existing is not None and has_library_access(existing)
     user = await approve_access(
         session,
         user_id,
@@ -187,6 +207,21 @@ async def approve_user_cmd(message: Message, session, bot):
         create_missing=True,
         days=days,
     )
+    if was_active and days is None:
+        await record_admin_action(
+            session,
+            message.from_user.id,
+            "approve_access",
+            target_type="user",
+            target_id=user_id,
+            details="already active",
+        )
+        await message.answer(
+            f"User {user_id} already has active library access; "
+            "the expiry was not changed.",
+            parse_mode=None,
+        )
+        return
     notified = await _notify_decision(bot, user, approved=True)
     await record_admin_action(
         session,
@@ -289,7 +324,11 @@ def my_access_view(db_user):
             )
         else:
             text += "\nNo expiry date."
-        markup = None
+        markup = (
+            access_group_kb()
+            if get_settings().access_group_id.strip()
+            else None
+        )
     elif status == APPROVED and access_is_expired(db_user):
         text = (
             "🔑 *My Access*\n\n"
@@ -347,6 +386,31 @@ async def request_access_cb(cb: CallbackQuery, session, db_user, bot):
         await cb.answer("You already have library access.")
         return
 
+    status = access_status(db_user)
+    if status == PENDING and db_user.access_requested_at is not None:
+        try:
+            await cb.message.edit_text(
+                "⏳ Your access request is already pending.", parse_mode=None
+            )
+        except Exception:
+            logger.exception("Could not update access request message")
+        await cb.answer("Request pending")
+        return
+
+    membership = await check_channel_membership(bot, db_user.id)
+    if membership.unavailable:
+        await cb.answer(
+            membership.reason or "Membership verification unavailable.",
+            show_alert=True,
+        )
+        return
+    if not membership.joined:
+        await cb.answer(
+            membership.reason or "Join the official channel first.",
+            show_alert=True,
+        )
+        return
+
     created = await request_access(session, db_user.id)
     await session.refresh(db_user)
     status = access_status(db_user)
@@ -354,13 +418,13 @@ async def request_access_cb(cb: CallbackQuery, session, db_user, bot):
     if created:
         await notify_admins(
             bot,
-            f"🔔 New library access request\n{display_name(db_user)}",
+            f"📥 New library access request\n{display_name(db_user)}",
             reply_markup=access_review_kb(db_user.id),
         )
 
     if status == PENDING:
         text = (
-            "⏳ Access request sent. An admin will review your request."
+            "✅ Access request sent. An admin will review your request."
             if created
             else "⏳ Your access request is already pending."
         )
@@ -375,6 +439,33 @@ async def request_access_cb(cb: CallbackQuery, session, db_user, bot):
         await cb.answer("Your access is already approved. Use /start.")
         return
     await cb.answer("Your access request could not be created. Use /start.")
+
+
+@router.callback_query(F.data == "access:invite")
+async def access_invite_cb(cb: CallbackQuery, db_user, bot):
+    if not has_library_access(db_user):
+        await cb.answer(
+            "Library access is not approved. Use /start.", show_alert=True
+        )
+        return
+
+    invite = await create_access_invite(bot, db_user.id)
+    if not invite.link:
+        await cb.answer(
+            invite.error or "The invitation could not be created. Try again.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        await cb.message.edit_text(
+            "🔗 Your single-use private group invite is ready.",
+            reply_markup=access_group_kb(invite.link),
+            parse_mode=None,
+        )
+    except Exception:
+        logger.exception("Could not show private group invite")
+    await cb.answer("Invitation created.")
 
 
 @router.callback_query(F.data.startswith("access:"))
@@ -392,7 +483,10 @@ async def access_decision_cb(cb: CallbackQuery, session, bot):
         await cb.answer("Invalid access request.", show_alert=True)
         return
 
+    was_active = False
     if action == "approve":
+        existing = await session.get(User, user_id)
+        was_active = existing is not None and has_library_access(existing)
         user = await approve_access(
             session, user_id, cb.from_user.id, create_missing=False
         )
@@ -406,6 +500,26 @@ async def access_decision_cb(cb: CallbackQuery, session, bot):
 
     if user is None:
         await cb.answer("User not found.", show_alert=True)
+        return
+
+    if was_active:
+        await record_admin_action(
+            session,
+            cb.from_user.id,
+            "approve_access",
+            target_type="user",
+            target_id=user_id,
+            details="already active",
+        )
+        message_text = getattr(cb.message, "text", None) or ""
+        if message_text.startswith(PENDING_HEADER):
+            await _refresh_pending_message(cb, session)
+        else:
+            await cb.message.edit_text(
+                f"Access already active for {display_name(user)}.",
+                parse_mode=None,
+            )
+        await cb.answer("Access already active.")
         return
 
     notified = await _notify_decision(

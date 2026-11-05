@@ -76,6 +76,10 @@ async def request_access(session: AsyncSession, user_id: int) -> bool:
         User.access_expires_at.is_not(None),
         User.access_expires_at <= now,
     )
+    unrequested_pending = and_(
+        User.access_status == PENDING,
+        User.access_requested_at.is_(None),
+    )
     result = await session.execute(
         update(User)
         .where(
@@ -84,6 +88,7 @@ async def request_access(session: AsyncSession, user_id: int) -> bool:
                 User.access_status.is_(None),
                 User.access_status.notin_((APPROVED, PENDING)),
                 expired_approval,
+                unrequested_pending,
             ),
         )
         .values(
@@ -115,6 +120,12 @@ async def approve_access(
         session.add(user)
 
     now = utcnow()
+    already_active = (
+        access_status(user) == APPROVED and not access_is_expired(user, now=now)
+    )
+    if already_active and days is None:
+        return user
+
     duration = get_settings().access_default_days if days is None else days
     if user.access_requested_at is None:
         user.access_requested_at = now
@@ -153,7 +164,10 @@ async def revoke_access(
 async def list_pending(session: AsyncSession, limit: int = 20) -> list[User]:
     result = await session.execute(
         select(User)
-        .where(User.access_status == PENDING)
+        .where(
+            User.access_status == PENDING,
+            User.access_requested_at.is_not(None),
+        )
         .order_by(User.access_requested_at, User.id)
         .limit(limit)
     )

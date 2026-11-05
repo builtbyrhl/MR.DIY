@@ -13,13 +13,25 @@ Optional access and retention settings:
 - `MEDIA_RETENTION_HOURS` — hours before delivered student media is deleted (1–48, default 24). Values of 48 are scheduled with a small safety buffer inside Telegram's limit.
 - `MEDIA_CLEANUP_INTERVAL_SECONDS` — how often the cleanup worker checks for due messages (default 300).
 
+## Student onboarding
+New students join the official channel, verify membership, request access, and wait for admin approval:
+1. Set `ONBOARDING_CHANNEL_ID` (numeric ID or `@username`) and `ONBOARDING_CHANNEL_URL` (the public channel link).
+2. Set `ACCESS_GROUP_ID` to the private student group. If empty, the bot falls back to `DESTINATION_GROUP_ID`.
+3. Optionally set `ACCESS_INVITE_TTL_MINUTES` (1–60, default 10) for single-use invites.
+4. Make the bot an administrator in the official channel so it can call `getChatMember`.
+5. Make the bot an administrator in the private group with **Invite Users** permission so it can create invite links.
+6. Keep `creates_join_request=False` on generated invites. If the group requires join requests, direct invites will not work; configure the group for direct invites instead.
+
+The bot fails closed when Telegram cannot verify membership. Approval is not rolled back if invite creation fails; the student can retry from `/myaccess`. Revoking access never removes the student from the private group.
+
 ## Admin
 - `/admin` for commands.
 - Add lectures: `/addlecture subject_slug|title|channel_msg_id|[premium]`
 - `/reorder <subject_slug>` to sort by channel sequence.
 - `/grant <user_id> [days]` only works for users who have already started the bot.
-- Student access: `/access` lists pending requests and approvals expiring within 7 days. `/approveuser <user_id> [days]` grants access for the optional duration (or `ACCESS_DEFAULT_DAYS`; pass `0` for lifetime); `/rejectuser <user_id>` and `/revokeuser <user_id>` remove it.
-- Students can check `/myaccess` (or **🔑 My Access**) for their status, expiry, and media-retention window.
+- Student access: `/access` lists pending requests (only users who actually requested) and approvals expiring within 7 days. `/approveuser <user_id> [days]` grants access for the optional duration (or `ACCESS_DEFAULT_DAYS`; pass `0` for lifetime); `/rejectuser <user_id>` and `/revokeuser <user_id>` remove it. Repeating approval without an explicit duration keeps an active expiry unchanged.
+- Approving a student sends a single-use private-group invite. If Telegram cannot create it, access stays approved and the student can retry from `/myaccess`.
+- Students can check `/myaccess` (or **🔑 My Access**) for their status, expiry, invite retry, and media-retention window.
 - Teachers: `/addteacher <subject_slug>|<name>|[alias1,alias2]`, `/teachers <subject_slug>`, `/setteacher <item_id>|<teacher_id|none>`, `/setteacherbulk <item_ids>|<teacher_id>`, and `/setlectureteacher <lecture_id>|<teacher_id|none>`.
 - Teacher aliases: `/teacheralias <teacher_id>|<alias>`, `/removealias <teacher_id>|<alias>`, and `/renameteacher <teacher_id>|<new name>`. Aliases are explicit and subject-scoped; spelling is never guessed.
 - Topics: `/addtopic <subject_slug>|<name>`, `/topics <subject_slug>`, `/settopic <item_ids>|<topic_ids|none>`, and `/setlecturetopic <lecture_id>|<topic_ids|none>`.
@@ -180,15 +192,15 @@ The startup migrations are additive and idempotent. They never delete uploads, b
 ## Deploy on Render
 1. Push repo to GitHub.
 2. Render → New → Blueprint → select repo (uses `render.yaml`).
-3. Set env vars: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL` (Supabase/Neon free Postgres), `CHANNEL_ID`.
+3. Set env vars: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL` (Supabase/Neon free Postgres), `CHANNEL_ID`, `ONBOARDING_CHANNEL_ID`, `ONBOARDING_CHANNEL_URL`, and `ACCESS_GROUP_ID`.
 4. Render sets `RENDER_EXTERNAL_URL` → webhook auto-configured. Health check at `/health`.
-5. Make bot admin in your channel/group.
+5. Make the bot an administrator in the official channel and the private student group, with **Invite Users** permission in the group.
 
 ## Deploy on Northflank
 1. Push repo to GitHub (already done).
 2. Northflank → New Service → "Deploy from GitHub repo".
 3. Build type: Buildpacks (or Dockerfile). Start command: `python -m bot.main` (or rely on `Procfile`).
-4. Set environment variables: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, `UPLOAD_INBOX_CHAT_ID`, and optionally `WEBHOOK_URL`/`PORT`.
+4. Set environment variables: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, `UPLOAD_INBOX_CHAT_ID`, `ONBOARDING_CHANNEL_ID`, `ONBOARDING_CHANNEL_URL`, `ACCESS_GROUP_ID`, and optionally `ACCESS_INVITE_TTL_MINUTES`/`WEBHOOK_URL`/`PORT`.
 5. If using polling: set service type to Worker (no HTTP port/health check).
 6. If using webhook: set `WEBHOOK_URL` to your Northflank public URL and keep health check at `/health`.
 7. Deploy and check logs for "DB initialized" and polling start.
@@ -199,7 +211,10 @@ Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.
 ## Deployment checklist
 1. Run `python -m pytest` and `python -m compileall bot`.
 2. Back up the production database.
-3. Deploy the reviewed commit, then restart the bot.
-4. Check startup logs for migration errors and confirm `/health` responds in webhook mode.
-5. Open `/admin`, `/review`, and `/stats` as an admin. Do not publish a real batch until the destination course/topic is verified.
-6. After deployment, confirm approved/unapproved users behave as expected with `/start`.
+3. Set the onboarding env vars and make the bot an administrator in the official channel and private student group.
+4. Deploy the reviewed commit, then restart the bot.
+5. Check startup logs for migration errors, onboarding configuration warnings, and confirm `/health` responds in webhook mode.
+6. Open `/admin`, `/review`, and `/stats` as an admin. Do not publish a real batch until the destination course/topic is verified.
+7. Test onboarding with a non-admin account: join the channel, verify membership, request access, approve from `/access`, and open the single-use invite.
+8. Confirm an existing approved user still bypasses onboarding and that `/subjects`, `/myaccess`, and `/start` work.
+9. Confirm invite failure still leaves access approved and the retry button appears in `/myaccess`.

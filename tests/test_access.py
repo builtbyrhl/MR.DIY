@@ -69,7 +69,34 @@ def _button_data(markup):
         button.callback_data
         for row in markup.inline_keyboard
         for button in row
+        if button.callback_data
     ]
+
+
+def _bot_with_membership(status="member", **member_values):
+    bot = AsyncMock()
+    bot.get_chat_member.return_value = SimpleNamespace(
+        status=status, **member_values
+    )
+    bot.create_chat_invite_link.return_value = SimpleNamespace(
+        invite_link="https://t.me/+single-use"
+    )
+    return bot
+
+
+def _enable_onboarding(monkeypatch, *, group_id="-1002"):
+    import bot.services.onboarding as onboarding
+
+    monkeypatch.setattr(
+        onboarding,
+        "get_settings",
+        lambda: SimpleNamespace(
+            onboarding_channel_id="-1001",
+            onboarding_channel_url="https://t.me/official",
+            access_group_id=group_id,
+            access_invite_ttl_minutes=10,
+        ),
+    )
 
 
 async def _add_user(session, user_id=9001, status=PENDING, **values):
@@ -107,6 +134,30 @@ async def test_request_access_is_idempotent(session):
 
     assert await request_access(session, user.id) is False
     assert await request_access(session, user.id) is False
+
+
+async def test_first_time_pending_user_can_request_access(session):
+    user = await _add_user(session, status=PENDING)
+    assert user.access_requested_at is None
+
+    assert await request_access(session, user.id) is True
+    await session.refresh(user)
+    assert access_status(user) == PENDING
+    assert user.access_requested_at is not None
+
+
+async def test_repeated_approval_without_days_preserves_active_expiry(session):
+    original_expiry = datetime.utcnow() + timedelta(days=5)
+    user = await _add_user(
+        session,
+        status=APPROVED,
+        access_expires_at=original_expiry,
+    )
+
+    approved = await approve_access(session, user.id, 456)
+
+    assert approved.access_expires_at == original_expiry
+    assert approved.access_decided_by is None
 
 
 async def test_approval_revocation_and_premium_are_independent(session):
@@ -170,7 +221,12 @@ async def test_lifetime_approval_has_no_expiry_and_revocation_clears_it(session)
 
 
 async def test_access_list_shows_pending_and_expiring_users(session):
-    pending = await _add_user(session, user_id=7781, status=PENDING)
+    pending = await _add_user(
+        session,
+        user_id=7781,
+        status=PENDING,
+        access_requested_at=datetime.utcnow(),
+    )
     expiring = await _add_user(
         session,
         user_id=7782,
@@ -185,6 +241,16 @@ async def test_access_list_shows_pending_and_expiring_users(session):
     assert f"({pending.id})" in text
     assert f"({expiring.id})" in text
     assert "expiring in the next 7 days" in text.lower()
+
+
+async def test_access_list_excludes_unrequested_pending_users(session):
+    await _add_user(session, user_id=7786, status=PENDING)
+    message = _message(123, "/access")
+
+    await access_list_cmd(message, session)
+
+    text = message.answer.await_args.args[0]
+    assert "No pending access requests." in text
 
 
 async def test_my_access_distinguishes_requested_and_unrequested(session):
@@ -246,20 +312,40 @@ async def test_approve_command_accepts_optional_days(session):
 
 
 @pytest.mark.parametrize("status", [PENDING, REJECTED, None])
-async def test_start_unapproved_shows_request_button_not_menu(session, status):
+async def test_start_unapproved_verified_user_can_request(
+    session, status, monkeypatch
+):
+    _enable_onboarding(monkeypatch)
     user = await _add_user(session, status=status)
     message = _message(user.id)
+    bot = _bot_with_membership()
 
-    await cmd_start(message, session, user)
+    await cmd_start(message, session, user, bot)
 
     message.answer.assert_awaited_once()
     text = message.answer.await_args.args[0]
     markup = message.answer.await_args.kwargs["reply_markup"]
-    assert "Request Access" in str(markup)
     assert _button_data(markup) == ["request_access"]
     assert "FMGE Lecture Bot" in text
-    if status == PENDING:
-        assert "pending" in text.lower()
+    assert "channel membership verified" in text.lower()
+    if status == REJECTED:
+        assert "not approved" in text.lower()
+
+
+async def test_start_unapproved_unverified_user_must_join(
+    session, monkeypatch
+):
+    _enable_onboarding(monkeypatch)
+    user = await _add_user(session, status=PENDING)
+    message = _message(user.id)
+    bot = _bot_with_membership(status="left")
+
+    await cmd_start(message, session, user, bot)
+
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert _button_data(markup) == ["onboarding:verify"]
+    assert "membership not confirmed" in text.lower()
 
 
 async def test_start_approved_shows_student_menu(session):
@@ -279,9 +365,12 @@ async def test_start_approved_shows_student_menu(session):
     assert quick.args[0] == "Quick start"
 
 
-async def test_request_access_callback_notifies_admin_only_once(session):
+async def test_request_access_callback_notifies_admin_only_once(
+    session, monkeypatch
+):
+    _enable_onboarding(monkeypatch)
     user = await _add_user(session, status=REJECTED)
-    bot = AsyncMock()
+    bot = _bot_with_membership()
 
     cb = _callback("request_access", user.id)
     await request_access_cb(cb, session, user, bot)
@@ -304,8 +393,19 @@ async def test_request_access_callback_notifies_admin_only_once(session):
 
 
 async def test_admin_pending_list_and_admin_only_gate(session):
-    await _add_user(session, user_id=9002, status=PENDING)
-    await _add_user(session, user_id=9003, status=PENDING)
+    requested_at = datetime.utcnow()
+    await _add_user(
+        session,
+        user_id=9002,
+        status=PENDING,
+        access_requested_at=requested_at,
+    )
+    await _add_user(
+        session,
+        user_id=9003,
+        status=PENDING,
+        access_requested_at=requested_at,
+    )
 
     admin_message = _message(123, "/access")
     await access_list_cmd(admin_message, session)
@@ -451,7 +551,11 @@ async def test_middleware_allows_start_and_access_request(db, monkeypatch):
     assert await DbMiddleware()(
         handler, request_event, {"event_from_user": _tg(9202)}
     ) == "handled"
-    assert handler.await_count == 2
+    verify_event = _middleware_event_callback(9202, "onboarding:verify")
+    assert await DbMiddleware()(
+        handler, verify_event, {"event_from_user": _tg(9202)}
+    ) == "handled"
+    assert handler.await_count == 3
 
 
 async def test_middleware_allows_approved_user_then_blocks_after_revocation(

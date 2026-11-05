@@ -13,7 +13,7 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.markdown import markdown_decoration
 
-from bot.keyboards.inline import browse_subjects_kb, request_access_kb
+from bot.keyboards.inline import browse_subjects_kb, onboarding_kb
 from bot.keyboards.reply import main_menu_kb
 from bot.db.models import Subject
 from bot.db.repo import (
@@ -37,6 +37,11 @@ from bot.services.access import (
 )
 from bot.services.catalog import ensure_subjects
 from bot.services.lecture_display import decorate_lecture_titles
+from bot.services.onboarding import (
+    MembershipCheck,
+    check_channel_membership,
+    onboarding_channel_url,
+)
 from bot.student_ui import lecture_title
 
 
@@ -50,8 +55,11 @@ WELCOME = (
 
 ACCESS_WELCOME = (
     "🎓 Welcome to *FMGE Lecture Bot*\n\n"
-    "This library is private. Request access and an admin will review your "
-    "account.\n\n"
+    "This library is private. Complete onboarding to request access:\n"
+    "1. Join the official channel.\n"
+    "2. Verify membership.\n"
+    "3. Request access.\n"
+    "4. Wait for admin approval.\n\n"
 )
 
 SEARCH_PROMPT = (
@@ -84,24 +92,70 @@ SETTINGS_TEXT = (
 )
 
 
-def _access_welcome_text(user) -> str:
+async def _onboarding_view(
+    bot,
+    user,
+    membership: MembershipCheck | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
     status = access_status(user)
-    if status == APPROVED and access_is_expired(user):
+    pending = status == PENDING and user.access_requested_at is not None
+    channel_url = onboarding_channel_url()
+
+    if pending:
         detail = (
-            "⏳ Your library access expired on "
-            f"{format_access_expiry(access_expires_at(user))}. "
-            "You can request a renewal."
+            "⏳ Status: access request pending admin approval.\n\n"
+            "You will be notified when an admin reviews your request."
         )
-    elif status == PENDING:
-        detail = "⏳ Your access request is pending admin approval."
-    elif status == REJECTED:
+        return ACCESS_WELCOME + detail, onboarding_kb(
+            channel_url, pending=True
+        )
+
+    if membership is None:
+        if bot is None:
+            membership = MembershipCheck(
+                joined=False,
+                unavailable=True,
+                reason="Telegram verification is unavailable.",
+            )
+        else:
+            membership = await check_channel_membership(bot, user.id)
+
+    if membership.unavailable:
         detail = (
-            "❌ Your previous access request was not approved. "
-            "You can request access again."
+            "⚠️ Status: membership verification unavailable.\n"
+            f"{membership.reason or 'Telegram could not verify membership.'}\n\n"
+            "Tap Verify Membership to try again."
         )
-    else:
-        detail = "🔒 Library access has not been approved yet."
-    return ACCESS_WELCOME + detail
+        return ACCESS_WELCOME + detail, onboarding_kb(channel_url)
+
+    if membership.joined:
+        if status == REJECTED:
+            detail = (
+                "✅ Status: channel membership verified.\n\n"
+                "Your previous access request was not approved. "
+                "You can request access again."
+            )
+        elif status == APPROVED and access_is_expired(user):
+            detail = (
+                "✅ Status: channel membership verified.\n\n"
+                "Your library access expired on "
+                f"{format_access_expiry(access_expires_at(user))}. "
+                "You can request a renewal."
+            )
+        else:
+            detail = (
+                "✅ Status: channel membership verified.\n\n"
+                "You can request library access now."
+            )
+        return ACCESS_WELCOME + detail, onboarding_kb(
+            channel_url, verified=True
+        )
+
+    detail = (
+        "🔒 Status: official channel membership not confirmed.\n\n"
+        "Join the official channel, then tap Verify Membership."
+    )
+    return ACCESS_WELCOME + detail, onboarding_kb(channel_url)
 
 
 def _resume_kb(lecture_id: int) -> InlineKeyboardMarkup:
@@ -204,14 +258,13 @@ async def build_home(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, session, db_user):
+async def cmd_start(message: Message, session, db_user, bot=None):
     if not has_library_access(db_user):
-        status = access_status(db_user)
-        pending = status == PENDING and db_user.access_requested_at is not None
+        text, markup = await _onboarding_view(bot, db_user)
         await message.answer(
-            _access_welcome_text(db_user),
+            text,
             parse_mode="Markdown",
-            reply_markup=request_access_kb(pending=pending),
+            reply_markup=markup,
         )
         return
 
@@ -223,6 +276,39 @@ async def cmd_start(message: Message, session, db_user):
     await message.answer(
         "Quick start", parse_mode=None, reply_markup=kb
     )
+
+
+@router.callback_query(F.data == "onboarding:verify")
+async def cb_verify_membership(cb: CallbackQuery, db_user, bot):
+    if has_library_access(db_user):
+        await cb.answer("You already have library access.")
+        return
+
+    status = access_status(db_user)
+    if status == PENDING and db_user.access_requested_at is not None:
+        text, markup = await _onboarding_view(bot, db_user)
+        await cb.message.edit_text(
+            text, parse_mode="Markdown", reply_markup=markup
+        )
+        await cb.answer("Request pending")
+        return
+
+    membership = await check_channel_membership(bot, db_user.id)
+    text, markup = await _onboarding_view(
+        bot, db_user, membership=membership
+    )
+    await cb.message.edit_text(
+        text, parse_mode="Markdown", reply_markup=markup
+    )
+    if membership.unavailable:
+        await cb.answer(
+            membership.reason or "Verification unavailable. Try again.",
+            show_alert=True,
+        )
+    elif membership.joined:
+        await cb.answer("Membership verified.")
+    else:
+        await cb.answer("Join the official channel first.", show_alert=True)
 
 
 @router.callback_query(F.data == "home")

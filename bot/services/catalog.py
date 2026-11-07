@@ -129,17 +129,19 @@ async def project_upload_to_lecture(
     return lecture, created
 
 
+def _published_uploads_query():
+    return select(UploadItem).where(
+        UploadItem.publication_status.is_distinct_from("withdrawn"),
+        or_(
+            UploadItem.publication_status == PUBLISHED,
+            UploadItem.published_message_id.is_not(None),
+        ),
+    )
+
+
 async def sync_published_uploads_to_catalog(session: AsyncSession) -> int:
     """Project all already-published uploads, including legacy publications."""
-    result = await session.execute(
-        select(UploadItem).where(
-            UploadItem.publication_status.is_not("withdrawn"),
-            or_(
-                UploadItem.publication_status == PUBLISHED,
-                UploadItem.published_message_id.is_not(None),
-            ),
-        )
-    )
+    result = await session.execute(_published_uploads_query())
     created = 0
     for item in result.scalars().all():
         item_id = item.id
@@ -150,7 +152,9 @@ async def sync_published_uploads_to_catalog(session: AsyncSession) -> int:
             await session.rollback()
             # Log the captured id: after rollback the ORM object expires, and
             # touching its attributes here would lazy-load outside the greenlet.
-            logger.exception("Failed to project upload item #%s", item_id)
+            logger.exception(
+                "Catalogue sync: failed to project upload item #%s", item_id
+            )
             continue
         if lecture is not None and was_created:
             created += 1

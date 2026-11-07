@@ -128,8 +128,9 @@ async def sync_catalogue_background() -> None:
         raise
     except Exception:
         logger.exception(
-            "Background catalogue sync failed; lectures from earlier "
-            "publications may be missing until the next successful sync"
+            "Catalogue sync: background projection of published uploads "
+            "failed; lectures from earlier publications may be missing "
+            "until the next successful sync"
         )
 
 

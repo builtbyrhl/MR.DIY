@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest_asyncio
 from sqlalchemy import func, select
+from sqlalchemy.dialects import postgresql
 
 from bot.db.ingestion_repo import approve_batch
 from bot.db.models import Course, Lecture, Progress, Subject, UploadItem, User
@@ -17,6 +18,7 @@ from bot.handlers.lectures import watch_lecture
 from bot.handlers.subjects import open_subject, open_teacher_lectures
 from bot.services.access import APPROVED
 from bot.services.catalog import (
+    _published_uploads_query,
     project_upload_to_lecture,
     sync_published_uploads_to_catalog,
 )
@@ -176,6 +178,59 @@ async def test_sync_backfills_existing_published_upload(session, biochemistry):
     assert lecture is not None
     assert lecture.source_upload_item_id == item.id
     assert lecture.title == "Biochemistry Lecture 4 - Lipids"
+
+
+async def test_sync_filters_withdrawn_and_retains_published_and_legacy_null_statuses(
+    session, biochemistry
+):
+    _, course = biochemistry
+    withdrawn = await _ingest(
+        session,
+        message_id=110,
+        caption="Biochemistry Lecture 10 - Withdrawn",
+    )
+    published = await _ingest(
+        session,
+        message_id=111,
+        caption="Biochemistry Lecture 11 - Published",
+    )
+    legacy = await _ingest(
+        session,
+        message_id=112,
+        caption="Biochemistry Lecture 12 - Legacy",
+    )
+    unpublished = await _ingest(
+        session,
+        message_id=113,
+        caption="Biochemistry Lecture 13 - Draft",
+    )
+
+    withdrawn.publication_status = "withdrawn"
+    withdrawn.published_message_id = 901
+    published.publication_status = "published"
+    published.published_message_id = None
+    legacy.publication_status = None
+    legacy.published_message_id = 902
+    unpublished.publication_status = None
+    unpublished.published_message_id = None
+    await session.commit()
+
+    created = await sync_published_uploads_to_catalog(session)
+
+    assert created == 2
+    lecture_ids = set(
+        (await session.scalars(select(Lecture.source_upload_item_id))).all()
+    )
+    assert lecture_ids == {published.id, legacy.id}
+
+
+def test_published_uploads_query_compiles_to_valid_postgresql():
+    sql = str(
+        _published_uploads_query().compile(dialect=postgresql.dialect())
+    )
+
+    assert "upload_items.publication_status IS DISTINCT FROM" in sql
+    assert "upload_items.publication_status IS NOT" not in sql
 
 
 async def test_subject_callback_lists_projected_uploads_in_order(

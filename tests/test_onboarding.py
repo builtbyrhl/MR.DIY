@@ -3,8 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import GetChatMember
 
 from bot.db.models import User
 from bot.handlers.access import (
@@ -15,18 +13,24 @@ from bot.handlers.access import (
     revoke_user_cmd,
 )
 from bot.handlers.channel import is_configured_chat
-from bot.handlers.start import cb_verify_membership
+from bot.handlers.start import cmd_start
 from bot.services.access import APPROVED, PENDING, REJECTED, access_status
 from bot.services.onboarding import (
-    check_channel_membership,
-    onboarding_config_errors,
+    ACCESS_GROUP_NAME,
+    INVITE_AVAILABLE,
+    INVITE_EXPIRED,
+    INVITE_FAILED,
+    INVITE_NOT_GENERATED,
+    InviteState,
+    access_group_config_errors,
+    clear_invite_state,
+    invite_state,
 )
 
 
 def _settings(**overrides):
     values = {
-        "onboarding_channel_id": "-1001",
-        "onboarding_channel_url": "https://t.me/official",
+        "channel_id": "@source",
         "access_group_id": "-1002",
         "access_invite_ttl_minutes": 10,
     }
@@ -40,6 +44,13 @@ def _enable_onboarding(monkeypatch, **overrides):
     settings = _settings(**overrides)
     monkeypatch.setattr(onboarding, "get_settings", lambda: settings)
     return settings
+
+
+@pytest.fixture(autouse=True)
+def _reset_invite_state():
+    clear_invite_state()
+    yield
+    clear_invite_state()
 
 
 def _tg(user_id=9001):
@@ -77,6 +88,15 @@ def _button_data(markup):
         button.callback_data
         for row in markup.inline_keyboard
         for button in row
+        if button.callback_data
+    ]
+
+
+def _button_labels(markup):
+    return [
+        button.text
+        for row in markup.inline_keyboard
+        for button in row
     ]
 
 
@@ -105,91 +125,58 @@ async def _add_user(session, user_id=9001, status=PENDING, **values):
     return user
 
 
-@pytest.mark.parametrize(
-    ("status", "is_member", "joined"),
-    [
-        ("creator", None, True),
-        ("administrator", None, True),
-        ("member", None, True),
-        ("restricted", True, True),
-        ("restricted", False, False),
-        ("left", None, False),
-        ("kicked", None, False),
-    ],
-)
-async def test_membership_statuses(
-    monkeypatch, status, is_member, joined
+def test_access_group_config_errors_reports_only_group(monkeypatch):
+    import bot.services.onboarding as onboarding
+
+    monkeypatch.setattr(
+        onboarding,
+        "get_settings",
+        lambda: _settings(access_group_id=""),
+    )
+
+    assert access_group_config_errors() == [
+        "ACCESS_GROUP_ID or DESTINATION_GROUP_ID",
+    ]
+
+
+async def test_no_channel_configuration_required_for_start(
+    session, monkeypatch
 ):
     _enable_onboarding(monkeypatch)
-    bot = AsyncMock()
-    bot.get_chat_member.return_value = SimpleNamespace(
-        status=status, is_member=is_member
-    )
+    user = await _add_user(session, status=REJECTED)
+    message = _message(user.id)
 
-    result = await check_channel_membership(bot, 42)
+    await cmd_start(message, session, user)
 
-    assert result.joined is joined
-    assert result.unavailable is False
-
-
-async def test_unexpected_membership_status_fails_closed(monkeypatch):
-    _enable_onboarding(monkeypatch)
-    bot = AsyncMock()
-    bot.get_chat_member.return_value = SimpleNamespace(status="unknown")
-
-    result = await check_channel_membership(bot, 42)
-
-    assert result.joined is False
-    assert result.unavailable is True
+    text = message.answer.await_args.args[0]
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert _button_data(markup) == ["request_access"]
+    assert ACCESS_GROUP_NAME in text
+    assert "No other channel is required" in text
+    assert "not approved" in text.lower()
 
 
-async def test_membership_api_error_fails_closed(monkeypatch):
-    _enable_onboarding(monkeypatch)
-    bot = AsyncMock()
-    bot.get_chat_member.side_effect = TelegramBadRequest(
-        GetChatMember(chat_id=-1001, user_id=42), "chat not found"
-    )
-
-    result = await check_channel_membership(bot, 42)
-
-    assert result.joined is False
-    assert result.unavailable is True
-
-
-async def test_verify_callback_does_not_grant_access(session, monkeypatch):
-    _enable_onboarding(monkeypatch)
-    user = await _add_user(session, status=PENDING)
-    bot = AsyncMock()
-    bot.get_chat_member.return_value = SimpleNamespace(status="member")
-    cb = _callback("onboarding:verify", user.id)
-
-    await cb_verify_membership(cb, user, bot)
-
-    await session.refresh(user)
-    assert access_status(user) == PENDING
-    assert user.access_requested_at is None
-    cb.message.edit_text.assert_awaited_once()
-    cb.answer.assert_awaited_once_with("Membership verified.")
-
-
-async def test_non_member_cannot_request_access(session, monkeypatch):
+async def test_request_access_does_not_check_channel_membership(
+    session, monkeypatch
+):
     _enable_onboarding(monkeypatch)
     user = await _add_user(session, status=REJECTED)
     bot = AsyncMock()
-    bot.get_chat_member.return_value = SimpleNamespace(status="left")
     cb = _callback("request_access", user.id)
 
     await request_access_cb(cb, session, user, bot)
 
     await session.refresh(user)
-    assert access_status(user) == REJECTED
-    assert user.access_requested_at is None
-    bot.send_message.assert_not_awaited()
-    cb.answer.assert_awaited_once()
-    assert cb.answer.await_args.kwargs["show_alert"] is True
+    assert access_status(user) == PENDING
+    assert user.access_requested_at is not None
+    bot.get_chat_member.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
+    cb.answer.assert_awaited_once_with("Request sent")
 
 
-async def test_approval_creates_single_use_invite(session, monkeypatch):
+async def test_approval_creates_single_use_med_lounge_invite(
+    session, monkeypatch
+):
     _enable_onboarding(monkeypatch)
     bot = AsyncMock()
     bot.create_chat_invite_link.return_value = SimpleNamespace(
@@ -208,8 +195,11 @@ async def test_approval_creates_single_use_invite(session, monkeypatch):
     assert kwargs["expire_date"] > int(
         (datetime.now(timezone.utc) + timedelta(minutes=9)).timestamp()
     )
+    message_text = bot.send_message.await_args.args[1]
+    assert ACCESS_GROUP_NAME in message_text
     markup = bot.send_message.await_args.kwargs["reply_markup"]
     assert _urls(markup) == ["https://t.me/+single-use"]
+    assert invite_state(8800).status == INVITE_AVAILABLE
 
 
 async def test_invite_failure_keeps_approval_and_offers_retry(
@@ -225,6 +215,7 @@ async def test_invite_failure_keeps_approval_and_offers_retry(
     assert access_status(user) == APPROVED
     markup = bot.send_message.await_args.kwargs["reply_markup"]
     assert _button_data(markup) == ["access:invite"]
+    assert invite_state(8801).status == INVITE_FAILED
 
 
 async def test_approved_user_can_retry_invite(session, monkeypatch):
@@ -240,25 +231,118 @@ async def test_approved_user_can_retry_invite(session, monkeypatch):
 
     markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
     assert _urls(markup) == ["https://t.me/+retry"]
-    cb.answer.assert_awaited_once_with("Invitation created.")
+    cb.answer.assert_awaited_once_with(
+        f"{ACCESS_GROUP_NAME} invitation created."
+    )
+    assert invite_state(user.id).status == INVITE_AVAILABLE
 
 
-async def test_my_access_offers_group_invite_when_configured(
-    session, monkeypatch
-):
+async def test_my_access_reports_available_invitation(session, monkeypatch):
     import bot.handlers.access as access
 
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     monkeypatch.setattr(
         access,
         "get_settings",
-        lambda: SimpleNamespace(access_group_id="-1002"),
+        lambda: _settings(access_group_id="-1002"),
+    )
+    monkeypatch.setattr(
+        access,
+        "invite_state",
+        lambda user_id: InviteState(
+            status=INVITE_AVAILABLE,
+            link="https://t.me/+available",
+            expires_at=expires_at,
+        ),
     )
     user = await _add_user(session, user_id=8804, status=APPROVED)
 
     text, markup = my_access_view(user)
 
     assert "Library access is active" in text
+    assert "invitation is available" in text
+    assert ACCESS_GROUP_NAME in text
+    assert _urls(markup) == ["https://t.me/+available"]
+
+
+async def test_my_access_reports_expired_invitation(session, monkeypatch):
+    import bot.handlers.access as access
+
+    monkeypatch.setattr(
+        access,
+        "get_settings",
+        lambda: _settings(access_group_id="-1002"),
+    )
+    monkeypatch.setattr(
+        access,
+        "invite_state",
+        lambda user_id: InviteState(status=INVITE_EXPIRED),
+    )
+    user = await _add_user(session, user_id=8805, status=APPROVED)
+
+    text, markup = my_access_view(user)
+
+    assert "expired" in text.lower()
     assert _button_data(markup) == ["access:invite"]
+    assert any("Regenerate" in label for label in _button_labels(markup))
+
+
+async def test_my_access_reports_failed_invitation(session, monkeypatch):
+    import bot.handlers.access as access
+
+    monkeypatch.setattr(
+        access,
+        "get_settings",
+        lambda: _settings(access_group_id="-1002"),
+    )
+    monkeypatch.setattr(
+        access,
+        "invite_state",
+        lambda user_id: InviteState(
+            status=INVITE_FAILED, error="telegram down"
+        ),
+    )
+    user = await _add_user(session, user_id=8806, status=APPROVED)
+
+    text, markup = my_access_view(user)
+
+    assert "attempt failed" in text.lower()
+    assert _button_data(markup) == ["access:invite"]
+    assert any("Regenerate" in label for label in _button_labels(markup))
+
+
+async def test_my_access_reports_missing_invitation_needs_generation(session, monkeypatch):
+    import bot.handlers.access as access
+
+    monkeypatch.setattr(
+        access,
+        "get_settings",
+        lambda: _settings(access_group_id="-1002"),
+    )
+    monkeypatch.setattr(
+        access,
+        "invite_state",
+        lambda user_id: InviteState(status=INVITE_NOT_GENERATED),
+    )
+    user = await _add_user(session, user_id=8807, status=APPROVED)
+
+    text, markup = my_access_view(user)
+
+    assert "No active invitation is recorded" in text
+    assert _button_data(markup) == ["access:invite"]
+    assert any("Get Med Lounge invite" in label for label in _button_labels(markup))
+
+
+def test_invite_state_marks_expired_invitations():
+    import bot.services.onboarding as onboarding
+
+    onboarding._invite_states[1] = InviteState(
+        status=INVITE_AVAILABLE,
+        link="https://t.me/+expired",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    assert invite_state(1).status == INVITE_EXPIRED
 
 
 async def test_revocation_does_not_remove_group_member(session):
@@ -273,12 +357,9 @@ async def test_revocation_does_not_remove_group_member(session):
     bot.kick_chat_member.assert_not_awaited()
 
 
-def test_channel_filter_only_accepts_configured_chats():
-    settings = _settings(channel_id="@source")
+def test_channel_filter_only_accepts_source_and_access_group():
+    settings = _settings(channel_id="@source", access_group_id="-1002")
 
-    assert is_configured_chat(
-        SimpleNamespace(id=-1001, username=None), settings
-    )
     assert is_configured_chat(
         SimpleNamespace(id=-1002, username=None), settings
     )
@@ -286,25 +367,8 @@ def test_channel_filter_only_accepts_configured_chats():
         SimpleNamespace(id=-2000, username="source"), settings
     )
     assert not is_configured_chat(
+        SimpleNamespace(id=-1001, username=None), settings
+    )
+    assert not is_configured_chat(
         SimpleNamespace(id=-2001, username="other"), settings
     )
-
-
-def test_onboarding_config_errors_reports_missing(monkeypatch):
-    import bot.services.onboarding as onboarding
-
-    monkeypatch.setattr(
-        onboarding,
-        "get_settings",
-        lambda: _settings(
-            onboarding_channel_id="",
-            onboarding_channel_url="",
-            access_group_id="",
-        ),
-    )
-
-    assert onboarding_config_errors() == [
-        "ONBOARDING_CHANNEL_ID",
-        "ONBOARDING_CHANNEL_URL",
-        "ACCESS_GROUP_ID or DESTINATION_GROUP_ID",
-    ]

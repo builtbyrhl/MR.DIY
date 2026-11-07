@@ -38,8 +38,12 @@ from bot.services.access import (
 from bot.services.auth import is_admin
 from bot.services.media_delivery import retention_hours
 from bot.services.onboarding import (
-    check_channel_membership,
+    ACCESS_GROUP_NAME,
+    INVITE_AVAILABLE,
+    INVITE_EXPIRED,
+    INVITE_FAILED,
     create_access_invite,
+    invite_state,
 )
 
 from bot.db.models import User
@@ -126,14 +130,14 @@ async def _notify_decision(
         invite = await create_access_invite(bot, user.id)
         if invite.link:
             text += (
-                "Use the single-use invite below to join the private "
-                "student group."
+                f"Use the single-use invite below to join the "
+                f"{ACCESS_GROUP_NAME} student group."
             )
             markup = access_group_kb(invite.link)
         else:
             text += (
-                "The private group invitation could not be created right "
-                "now. Access is still approved; use /myaccess to retry."
+                f"The {ACCESS_GROUP_NAME} invitation could not be created "
+                "right now. Access is still approved; use /myaccess to retry."
             )
             markup = access_group_kb(retry=True)
     elif revoked:
@@ -308,6 +312,43 @@ async def revoke_user_cmd(message: Message, session, bot):
     )
 
 
+def _active_invite_view(db_user):
+    settings = get_settings()
+    ttl = max(1, min(getattr(settings, "access_invite_ttl_minutes", 10), 60))
+    if not settings.access_group_id.strip():
+        return (
+            f"\n\n⚠️ {ACCESS_GROUP_NAME} is not configured. "
+            "Contact an admin.",
+            None,
+        )
+
+    state = invite_state(db_user.id)
+    if state.status == INVITE_AVAILABLE and state.link:
+        return (
+            f"\n\n🔗 Your single-use {ACCESS_GROUP_NAME} invitation is "
+            f"available until {format_access_expiry(state.expires_at)}.",
+            access_group_kb(state.link),
+        )
+    if state.status == INVITE_EXPIRED:
+        return (
+            f"\n\n⚠️ Your previous {ACCESS_GROUP_NAME} invitation expired. "
+            "Generate a new one below.",
+            access_group_kb(retry=True),
+        )
+    if state.status == INVITE_FAILED:
+        return (
+            f"\n\n⚠️ Your last {ACCESS_GROUP_NAME} invitation attempt failed. "
+            "Try again below.",
+            access_group_kb(retry=True),
+        )
+    return (
+        f"\n\n🔗 No active invitation is recorded. Your invitation is "
+        f"single-use and expires after {ttl} minutes; generate one below "
+        "if needed.",
+        access_group_kb(),
+    )
+
+
 def my_access_view(db_user):
     status = access_status(db_user)
     expires = access_expires_at(db_user)
@@ -324,17 +365,15 @@ def my_access_view(db_user):
             )
         else:
             text += "\nNo expiry date."
-        markup = (
-            access_group_kb()
-            if get_settings().access_group_id.strip()
-            else None
-        )
+        invite_text, markup = _active_invite_view(db_user)
+        text += invite_text
     elif status == APPROVED and access_is_expired(db_user):
         text = (
             "🔑 *My Access*\n\n"
             f"⏳ Your library access expired on "
             f"{format_access_expiry(expires)}.\n\n"
-            "Request a renewal below."
+            "Request a renewal below to receive a new "
+            f"{ACCESS_GROUP_NAME} invitation."
         )
         markup = request_access_kb()
     elif status == PENDING:
@@ -397,20 +436,6 @@ async def request_access_cb(cb: CallbackQuery, session, db_user, bot):
         await cb.answer("Request pending")
         return
 
-    membership = await check_channel_membership(bot, db_user.id)
-    if membership.unavailable:
-        await cb.answer(
-            membership.reason or "Membership verification unavailable.",
-            show_alert=True,
-        )
-        return
-    if not membership.joined:
-        await cb.answer(
-            membership.reason or "Join the official channel first.",
-            show_alert=True,
-        )
-        return
-
     created = await request_access(session, db_user.id)
     await session.refresh(db_user)
     status = access_status(db_user)
@@ -424,7 +449,8 @@ async def request_access_cb(cb: CallbackQuery, session, db_user, bot):
 
     if status == PENDING:
         text = (
-            "✅ Access request sent. An admin will review your request."
+            "✅ Access request sent. An admin will review it. If approved, "
+            f"you'll receive a single-use {ACCESS_GROUP_NAME} invitation."
             if created
             else "⏳ Your access request is already pending."
         )
@@ -459,13 +485,13 @@ async def access_invite_cb(cb: CallbackQuery, db_user, bot):
 
     try:
         await cb.message.edit_text(
-            "🔗 Your single-use private group invite is ready.",
+            f"🔗 Your single-use {ACCESS_GROUP_NAME} invite is ready.",
             reply_markup=access_group_kb(invite.link),
             parse_mode=None,
         )
     except Exception:
-        logger.exception("Could not show private group invite")
-    await cb.answer("Invitation created.")
+        logger.exception("Could not show Med Lounge invite")
+    await cb.answer(f"{ACCESS_GROUP_NAME} invitation created.")
 
 
 @router.callback_query(F.data.startswith("access:"))

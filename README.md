@@ -14,15 +14,13 @@ Optional access and retention settings:
 - `MEDIA_CLEANUP_INTERVAL_SECONDS` — how often the cleanup worker checks for due messages (default 300).
 
 ## Student onboarding
-New students join the official channel, verify membership, request access, and wait for admin approval:
-1. Set `ONBOARDING_CHANNEL_ID` (numeric ID or `@username`) and `ONBOARDING_CHANNEL_URL` (the public channel link).
-2. Set `ACCESS_GROUP_ID` to the private student group. If empty, the bot falls back to `DESTINATION_GROUP_ID`.
-3. Optionally set `ACCESS_INVITE_TTL_MINUTES` (1–60, default 10) for single-use invites.
-4. Make the bot an administrator in the official channel so it can call `getChatMember`.
-5. Make the bot an administrator in the private group with **Invite Users** permission so it can create invite links.
-6. Keep `creates_join_request=False` on generated invites. If the group requires join requests, direct invites will not work; configure the group for direct invites instead.
+Students request access, an admin reviews the request, and approval sends a single-use invitation to **Med Lounge**:
+1. Set `ACCESS_GROUP_ID` to the Med Lounge chat ID. If empty, the bot falls back to `DESTINATION_GROUP_ID`.
+2. Optionally set `ACCESS_INVITE_TTL_MINUTES` (1–60, default 10) for single-use invites.
+3. Make the bot an administrator in Med Lounge with **Invite Users** permission so it can create invite links.
+4. Keep `creates_join_request=False` on generated invites. If the group requires join requests, direct invites will not work; configure the group for direct invites instead.
 
-The bot fails closed when Telegram cannot verify membership. Approval is not rolled back if invite creation fails; the student can retry from `/myaccess`. Revoking access never removes the student from the private group.
+There is no separate onboarding channel and no `getChatMember` verification step. `CHANNEL_ID` remains the lecture source channel and is not used for onboarding. Approval is not rolled back if invite creation fails; the student can retry from `/myaccess`, which shows whether the invitation is available, expired, or needs regeneration. Revoking access never removes the student from Med Lounge.
 
 ## Admin
 - `/admin` for commands.
@@ -192,15 +190,15 @@ The startup migrations are additive and idempotent. They never delete uploads, b
 ## Deploy on Render
 1. Push repo to GitHub.
 2. Render → New → Blueprint → select repo (uses `render.yaml`).
-3. Set env vars: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL` (Supabase/Neon free Postgres), `CHANNEL_ID`, `ONBOARDING_CHANNEL_ID`, `ONBOARDING_CHANNEL_URL`, and `ACCESS_GROUP_ID`.
+3. Set env vars: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL` (Supabase/Neon free Postgres), `CHANNEL_ID`, and `ACCESS_GROUP_ID`.
 4. Render sets `RENDER_EXTERNAL_URL` → webhook auto-configured. Health check at `/health`.
-5. Make the bot an administrator in the official channel and the private student group, with **Invite Users** permission in the group.
+5. Make the bot an administrator in Med Lounge with **Invite Users** permission.
 
 ## Deploy on Northflank
 1. Push repo to GitHub (already done).
 2. Northflank → New Service → "Deploy from GitHub repo".
 3. Build type: Buildpacks (or Dockerfile). Start command: `python -m bot.main` (or rely on `Procfile`).
-4. Set environment variables: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, `UPLOAD_INBOX_CHAT_ID`, `ONBOARDING_CHANNEL_ID`, `ONBOARDING_CHANNEL_URL`, `ACCESS_GROUP_ID`, and optionally `ACCESS_INVITE_TTL_MINUTES`/`WEBHOOK_URL`/`PORT`.
+4. Set environment variables: `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, `UPLOAD_INBOX_CHAT_ID`, `ACCESS_GROUP_ID`, and optionally `ACCESS_INVITE_TTL_MINUTES`/`WEBHOOK_URL`/`PORT`.
 5. If using polling: set service type to Worker (no HTTP port/health check).
 6. If using webhook: set `WEBHOOK_URL` to your Northflank public URL and keep health check at `/health`.
 7. Deploy and check logs for "DB initialized" and polling start.
@@ -211,10 +209,10 @@ Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.
 ## Deployment checklist
 1. Run `python -m pytest` and `python -m compileall bot`.
 2. Back up the production database.
-3. Set the onboarding env vars and make the bot an administrator in the official channel and private student group.
+3. Set `ACCESS_GROUP_ID` to Med Lounge and make the bot an administrator there with **Invite Users** permission.
 4. Deploy the reviewed commit, then restart the bot.
-5. Check startup logs for migration errors, onboarding configuration warnings, and confirm `/health` responds in webhook mode.
+5. Check startup logs for migration errors, access-group configuration warnings, and confirm `/health` responds in webhook mode.
 6. Open `/admin`, `/review`, and `/stats` as an admin. Do not publish a real batch until the destination course/topic is verified.
-7. Test onboarding with a non-admin account: join the channel, verify membership, request access, approve from `/access`, and open the single-use invite.
+7. Test onboarding with a non-admin account: request access, approve from `/access`, and open the single-use Med Lounge invite.
 8. Confirm an existing approved user still bypasses onboarding and that `/subjects`, `/myaccess`, and `/start` work.
-9. Confirm invite failure still leaves access approved and the retry button appears in `/myaccess`.
+9. Confirm invite failure still leaves access approved and the regenerate button appears in `/myaccess`.

@@ -73,17 +73,6 @@ def _button_data(markup):
     ]
 
 
-def _bot_with_membership(status="member", **member_values):
-    bot = AsyncMock()
-    bot.get_chat_member.return_value = SimpleNamespace(
-        status=status, **member_values
-    )
-    bot.create_chat_invite_link.return_value = SimpleNamespace(
-        invite_link="https://t.me/+single-use"
-    )
-    return bot
-
-
 def _enable_onboarding(monkeypatch, *, group_id="-1002"):
     import bot.services.onboarding as onboarding
 
@@ -91,8 +80,6 @@ def _enable_onboarding(monkeypatch, *, group_id="-1002"):
         onboarding,
         "get_settings",
         lambda: SimpleNamespace(
-            onboarding_channel_id="-1001",
-            onboarding_channel_url="https://t.me/official",
             access_group_id=group_id,
             access_invite_ttl_minutes=10,
         ),
@@ -312,40 +299,24 @@ async def test_approve_command_accepts_optional_days(session):
 
 
 @pytest.mark.parametrize("status", [PENDING, REJECTED, None])
-async def test_start_unapproved_verified_user_can_request(
+async def test_start_unapproved_user_can_request(
     session, status, monkeypatch
 ):
     _enable_onboarding(monkeypatch)
     user = await _add_user(session, status=status)
     message = _message(user.id)
-    bot = _bot_with_membership()
 
-    await cmd_start(message, session, user, bot)
+    await cmd_start(message, session, user)
 
     message.answer.assert_awaited_once()
     text = message.answer.await_args.args[0]
     markup = message.answer.await_args.kwargs["reply_markup"]
     assert _button_data(markup) == ["request_access"]
     assert "FMGE Lecture Bot" in text
-    assert "channel membership verified" in text.lower()
+    assert "Med Lounge" in text
+    assert "No other channel is required" in text
     if status == REJECTED:
         assert "not approved" in text.lower()
-
-
-async def test_start_unapproved_unverified_user_must_join(
-    session, monkeypatch
-):
-    _enable_onboarding(monkeypatch)
-    user = await _add_user(session, status=PENDING)
-    message = _message(user.id)
-    bot = _bot_with_membership(status="left")
-
-    await cmd_start(message, session, user, bot)
-
-    text = message.answer.await_args.args[0]
-    markup = message.answer.await_args.kwargs["reply_markup"]
-    assert _button_data(markup) == ["onboarding:verify"]
-    assert "membership not confirmed" in text.lower()
 
 
 async def test_start_approved_shows_student_menu(session):
@@ -370,13 +341,14 @@ async def test_request_access_callback_notifies_admin_only_once(
 ):
     _enable_onboarding(monkeypatch)
     user = await _add_user(session, status=REJECTED)
-    bot = _bot_with_membership()
+    bot = AsyncMock()
 
     cb = _callback("request_access", user.id)
     await request_access_cb(cb, session, user, bot)
 
     await session.refresh(user)
     assert access_status(user) == PENDING
+    bot.get_chat_member.assert_not_awaited()
     bot.send_message.assert_awaited_once()
     admin_id = bot.send_message.await_args.args[0]
     assert admin_id == 123
@@ -551,11 +523,7 @@ async def test_middleware_allows_start_and_access_request(db, monkeypatch):
     assert await DbMiddleware()(
         handler, request_event, {"event_from_user": _tg(9202)}
     ) == "handled"
-    verify_event = _middleware_event_callback(9202, "onboarding:verify")
-    assert await DbMiddleware()(
-        handler, verify_event, {"event_from_user": _tg(9202)}
-    ) == "handled"
-    assert handler.await_count == 3
+    assert handler.await_count == 2
 
 
 async def test_middleware_allows_approved_user_then_blocks_after_revocation(

@@ -20,7 +20,6 @@ STALE_JOIN_AFTER = timedelta(minutes=10)
 def is_configured_chat(chat, settings=None) -> bool:
     settings = settings or get_settings()
     targets = {
-        settings.onboarding_channel_id,
         settings.channel_id,
         settings.access_group_id,
     }

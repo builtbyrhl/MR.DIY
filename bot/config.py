@@ -17,11 +17,9 @@ class Settings:
         "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/mrdiy"
     ))
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-    channel_id: str = field(default_factory=lambda: os.getenv("CHANNEL_ID", ""))  # source channel for lectures
+    channel_id: str = field(default_factory=lambda: os.getenv("CHANNEL_ID", ""))  # source channel for lectures, not onboarding
     upload_inbox_chat_id: str = field(default_factory=lambda: os.getenv("UPLOAD_INBOX_CHAT_ID", ""))
     destination_group_id: str = field(default_factory=lambda: os.getenv("DESTINATION_GROUP_ID", ""))
-    onboarding_channel_id: str = field(default_factory=lambda: os.getenv("ONBOARDING_CHANNEL_ID", ""))
-    onboarding_channel_url: str = field(default_factory=lambda: os.getenv("ONBOARDING_CHANNEL_URL", ""))
     access_group_id: str = field(default_factory=lambda: (
         os.getenv("ACCESS_GROUP_ID") or os.getenv("DESTINATION_GROUP_ID", "")
     ))

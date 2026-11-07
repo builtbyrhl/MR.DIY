@@ -21,10 +21,6 @@ services:
         sync: false
       - key: DESTINATION_GROUP_ID
         sync: false
-      - key: ONBOARDING_CHANNEL_ID
-        sync: false
-      - key: ONBOARDING_CHANNEL_URL
-        sync: false
       - key: ACCESS_GROUP_ID
         sync: false
       - key: ACCESS_INVITE_TTL_MINUTES

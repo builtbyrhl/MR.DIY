@@ -11,6 +11,8 @@ from bot.handlers.start import (
     build_home,
     cb_home,
     cb_settings_access,
+    cb_settings_help,
+    help_msg,
     settings_entry,
 )
 from bot.handlers.progress import cb_progress
@@ -126,7 +128,8 @@ async def test_home_callback_edits_message(session, ux):
     cb = _callback("home")
     await cb_home(cb, session, ux["user"])
     text = cb.message.edit_text.await_args.args[0]
-    assert "FMGE Lecture Bot" in text
+    assert "MR.DIY" in text
+    assert "Your organised medical lecture library." in text
     cb.answer.assert_awaited_once_with()
 
 
@@ -151,6 +154,33 @@ async def test_settings_access_renders_access_view(session, ux):
     markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
     assert "My Access" in text
     assert "settings:menu" in _buttons(markup)
+
+
+async def test_help_groups_student_and_access_commands(session, ux):
+    message = _message()
+    await help_msg(message, ux["user"])
+    text = message.answer.await_args.args[0]
+    assert "*Student commands*" in text
+    assert "*Access and membership*" in text
+    assert "/myaccess" in text
+    assert "*Admin commands*" not in text
+
+
+async def test_help_shows_admin_commands_to_admins():
+    message = _message(user_id=123)
+    await help_msg(message, SimpleNamespace(id=123))
+    text = message.answer.await_args.args[0]
+    assert "*Admin commands*" in text
+    assert "/admin" in text
+
+
+async def test_settings_help_uses_grouped_help(session, ux):
+    cb = _callback("settings:help")
+    await cb_settings_help(cb, ux["user"])
+    text = cb.message.edit_text.await_args.args[0]
+    assert "*Student commands*" in text
+    assert "*Access and membership*" in text
+    assert "*Admin commands*" not in text
 
 
 async def test_progress_callback_edits_message(session, ux):

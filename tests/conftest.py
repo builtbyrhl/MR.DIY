@@ -1,5 +1,6 @@
 import os
 
+os.environ["BOT_IDENTITY"] = "mrdiy"
 os.environ["BOT_TOKEN"] = "test-token"
 os.environ["ADMIN_IDS"] = "123"
 

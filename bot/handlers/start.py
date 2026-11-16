@@ -13,6 +13,7 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.markdown import markdown_decoration
 
+from bot.config import get_settings
 from bot.keyboards.inline import browse_subjects_kb, request_access_kb
 from bot.keyboards.reply import main_menu_kb
 from bot.db.models import Subject
@@ -35,6 +36,7 @@ from bot.services.access import (
     format_access_expiry,
     has_library_access,
 )
+from bot.services.auth import is_admin
 from bot.services.catalog import ensure_subjects
 from bot.services.lecture_display import decorate_lecture_titles
 from bot.student_ui import lecture_title
@@ -43,41 +45,62 @@ from bot.student_ui import lecture_title
 router = Router()
 
 
-WELCOME = (
-    "🎓 *FMGE Lecture Bot*\n"
-    "Your organised medical lecture library."
-)
-
-ACCESS_WELCOME = (
-    "🎓 Welcome to *FMGE Lecture Bot*\n\n"
-    "This library is private. Request access below. An admin will review "
-    "your request. If approved, you'll receive a single-use invitation to "
-    "the Med Lounge student group. No other channel is required.\n\n"
-)
-
 SEARCH_PROMPT = (
     "🔍 *Search the library*\n\n"
     "Send /search followed by a keyword.\n"
     "Example: /search anatomy heart"
 )
 
-HELP_TEXT = (
-    "❓ *Help*\n\n"
-    "*Everyday use*\n"
-    "• 📚 Library — all subjects, pinned first\n"
-    "• ▶️ Continue — jump to your next lecture\n"
-    "• 📈 Progress — streaks, totals and history\n"
-    "• ⚙️ Settings — access, search, institutions, saved, help\n\n"
-    "*Commands*\n"
-    "/bookmarks — saved lectures\n"
-    "/progress — your progress\n"
-    "/premium — upgrade\n"
-    "/myaccess — access status\n"
-    "/start — home\n"
-    "/subjects — browse subjects\n"
-    "/search <keyword> — find lectures\n"
-    "/admin — admin panel (admins only)"
+ADMIN_HELP_TEXT = (
+    "\n\n*Admin commands*\n"
+    "/admin — admin panel and full command list\n"
+    "/access — pending requests and expiring access\n"
+    "/review — upload review\n"
+    "/stats — bot statistics"
 )
+
+
+def welcome_text() -> str:
+    settings = get_settings()
+    return (
+        f"{settings.bot_brand_emoji} *{settings.bot_display_name}*\n"
+        f"{settings.bot_tagline}"
+    )
+
+
+def access_welcome_text() -> str:
+    settings = get_settings()
+    return (
+        f"{settings.bot_brand_emoji} Welcome to *{settings.bot_display_name}*\n\n"
+        f"{settings.bot_tagline}\n\n"
+        "This library is private. Request access below. An admin will review "
+        "your request. If approved, you'll receive a single-use invitation to "
+        "the Med Lounge student group. No other channel is required.\n\n"
+    )
+
+
+def help_text(is_admin_user: bool) -> str:
+    settings = get_settings()
+    text = (
+        f"❓ *{settings.bot_display_name} Help*\n\n"
+        "*Student commands*\n"
+        "• 📚 Library — all subjects, pinned first\n"
+        "• ▶️ Continue — jump to your next lecture\n"
+        "• 📈 Progress — streaks, totals and history\n"
+        "• ⚙️ Settings — access, search, institutions, saved, help\n\n"
+        "/bookmarks — saved lectures\n"
+        "/help — this guide\n"
+        "/premium — upgrade\n"
+        "/progress — your progress\n"
+        "/start — home\n"
+        "/subjects — browse subjects\n"
+        "/search <keyword> — find lectures\n\n"
+        "*Access and membership*\n"
+        "/myaccess — access status and Med Lounge invitation\n"
+        "Request access from /start."
+    )
+    return text + (ADMIN_HELP_TEXT if is_admin_user else "")
+
 
 SETTINGS_TEXT = (
     "⚙️ *Settings*\n\n"
@@ -94,7 +117,7 @@ def _onboarding_view(user) -> tuple[str, InlineKeyboardMarkup]:
             "⏳ Status: access request pending admin approval.\n\n"
             "You will be notified when an admin reviews your request."
         )
-        return ACCESS_WELCOME + detail, request_access_kb(pending=True)
+        return access_welcome_text() + detail, request_access_kb(pending=True)
 
     if status == REJECTED:
         detail = (
@@ -110,7 +133,7 @@ def _onboarding_view(user) -> tuple[str, InlineKeyboardMarkup]:
     else:
         detail = "🔒 Status: library access has not been approved yet."
 
-    return ACCESS_WELCOME + detail, request_access_kb()
+    return access_welcome_text() + detail, request_access_kb()
 
 
 def _resume_kb(lecture_id: int) -> InlineKeyboardMarkup:
@@ -186,7 +209,7 @@ async def build_home(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
         await decorate_lecture_titles(session, [lecture])
         heading = "Continue where you left off" if started else "Start here"
         text = (
-            f"{WELCOME}\n\n"
+            f"{welcome_text()}\n\n"
             f"▶️ *{heading}*\n"
             f"{subject.emoji} {markdown_decoration.quote(subject.name)} — "
             f"{markdown_decoration.quote(lecture_title(lecture))}"
@@ -194,7 +217,7 @@ async def build_home(session, db_user) -> tuple[str, InlineKeyboardMarkup]:
         kb = _resume_kb(lecture.id)
     else:
         text = (
-            f"{WELCOME}\n\n"
+            f"{welcome_text()}\n\n"
             "Pick a subject below and your lectures will appear here."
         )
         kb = browse_subjects_kb()
@@ -310,9 +333,11 @@ async def cb_settings_bookmarks(cb: CallbackQuery, session, db_user):
 
 
 @router.callback_query(F.data == "settings:help")
-async def cb_settings_help(cb: CallbackQuery):
+async def cb_settings_help(cb: CallbackQuery, db_user):
     await cb.message.edit_text(
-        HELP_TEXT, parse_mode="Markdown", reply_markup=_with_back(None)
+        help_text(is_admin(db_user.id)),
+        parse_mode="Markdown",
+        reply_markup=_with_back(None),
     )
     await cb.answer()
 
@@ -337,8 +362,10 @@ async def cb_lib_saved(cb: CallbackQuery, session, db_user):
 
 @router.message(Command("help"))
 @router.message(F.text == "❓ Help")
-async def help_msg(message: Message):
-    await message.answer(HELP_TEXT, parse_mode="Markdown")
+async def help_msg(message: Message, db_user):
+    await message.answer(
+        help_text(is_admin(db_user.id)), parse_mode="Markdown"
+    )
 
 
 # subjects handled in subjects router

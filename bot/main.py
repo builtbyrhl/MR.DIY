@@ -13,10 +13,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent
 from aiohttp import web
 
-from bot.config import get_settings
+from bot.config import ConfigurationError, Settings, get_settings
 from bot.db.session import get_session_factory, init_db
 from bot.middlewares.db import DbMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.redaction import (
+    configure_redaction,
+    install_logging_redaction,
+    redact_secrets,
+)
 from bot.services.auth import all_admin_ids, load_db_admin_cache
 from bot.services.catalog import sync_published_uploads_to_catalog
 from bot.services.media_delivery import start_media_cleanup
@@ -26,6 +31,7 @@ from bot.services.reminders import digest_loop, reminder_loop
 from bot.handlers import start, subjects, lectures, bookmarks, progress, search, premium, access, admin, channel, review, ingest
 
 logging.basicConfig(level=logging.INFO)
+install_logging_redaction()
 logger = logging.getLogger(__name__)
 
 ERROR_NOTIFY_INTERVAL_SECONDS = 300
@@ -36,10 +42,10 @@ def _error_context(event: ErrorEvent) -> str:
     update = event.update
     message = getattr(update, "message", None)
     if message is not None:
-        return f"message: {(message.text or '')[:120]}"
+        return redact_secrets(f"message: {(message.text or '')[:120]}")
     callback = getattr(update, "callback_query", None)
     if callback is not None:
-        return f"callback: {(callback.data or '')[:120]}"
+        return redact_secrets(f"callback: {(callback.data or '')[:120]}")
     return f"update: {type(update).__name__}"
 
 
@@ -49,7 +55,9 @@ def _format_error(event: ErrorEvent) -> str:
     tb = "".join(
         traceback.format_exception(type(exc), exc, exc.__traceback__)
     )
-    return f"⚠️ Bot error\n{summary}\n{_error_context(event)}\n\n{tb[-1200:]}"
+    return redact_secrets(
+        f"⚠️ Bot error\n{summary}\n{_error_context(event)}\n\n{tb[-1200:]}"
+    )
 
 
 async def notify_error(event: ErrorEvent) -> None:
@@ -59,7 +67,7 @@ async def notify_error(event: ErrorEvent) -> None:
     )
     if isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc):
         return
-    key = f"{type(exc).__name__}:{str(exc)[:80]}"
+    key = f"{type(exc).__name__}:{redact_secrets(str(exc))[:80]}"
     now = time.monotonic()
     if now - _error_notify_last.get(key, 0.0) < ERROR_NOTIFY_INTERVAL_SECONDS:
         return
@@ -88,6 +96,14 @@ def build_dispatcher() -> Dispatcher:
               admin.router, channel.router, review.router, ingest.router):
         dp.include_router(r)
     return dp
+
+
+def build_bot(settings: Settings) -> Bot:
+    configure_redaction(settings)
+    return Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    )
 
 
 async def on_startup(bot: Bot):
@@ -172,7 +188,7 @@ async def _start_health_server(settings) -> web.AppRunner | None:
 
 async def run_polling():
     settings = get_settings()
-    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    bot = build_bot(settings)
     dp = build_dispatcher()
     runner = await _start_health_server(settings)
     cleanup_task = None
@@ -196,8 +212,10 @@ async def run_polling():
             await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"], drop_pending_updates=False)
         except TelegramConflictError:
             logger.error(
-                "Telegram polling conflict: another instance is polling with this "
-                "BOT_TOKEN. Stop the duplicate deployment/replica, then restart."
+                "Telegram polling conflict: another instance is polling with "
+                "this bot token (%s). Stop the duplicate deployment/replica, "
+                "then restart.",
+                settings.bot_token_env,
             )
             raise
     finally:
@@ -211,7 +229,7 @@ async def run_polling():
 
 async def run_webhook():
     settings = get_settings()
-    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    bot = build_bot(settings)
     dp = build_dispatcher()
 
     app = web.Application()
@@ -262,12 +280,14 @@ async def run_webhook():
 def main():
     try:
         settings = get_settings()
+    except ConfigurationError as exc:
+        logger.error("Invalid bot configuration: %s", exc)
+        raise SystemExit(1)
     except Exception as exc:
-        logging.getLogger(__name__).error("Invalid configuration: %s", exc)
+        logger.error("Invalid configuration (%s)", type(exc).__name__)
         raise SystemExit(1)
-    if not settings.bot_token:
-        logging.getLogger(__name__).error("BOT_TOKEN is required")
-        raise SystemExit(1)
+    configure_redaction(settings)
+    logger.info("Bot profile selected: %s", settings.bot_identity_summary)
     if settings.is_webhook:
         asyncio.run(run_webhook())
     else:

@@ -312,7 +312,8 @@ async def test_start_unapproved_user_can_request(
     text = message.answer.await_args.args[0]
     markup = message.answer.await_args.kwargs["reply_markup"]
     assert _button_data(markup) == ["request_access"]
-    assert "FMGE Lecture Bot" in text
+    assert "MR.DIY" in text
+    assert "Your organised medical lecture library." in text
     assert "Med Lounge" in text
     assert "No other channel is required" in text
     if status == REJECTED:

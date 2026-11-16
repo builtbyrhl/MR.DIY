@@ -1,12 +1,20 @@
-# FMGE Lecture Telegram Bot (MR.DIY)
+# Brain.exe
+
+Your brain's favourite operating system.
 
 Python (aiogram 3) + PostgreSQL.
 
 ## Setup
-1. Copy `.env.example` to `.env` and fill `BOT_TOKEN`, `ADMIN_IDS`, `CHANNEL_ID`.
+1. Copy `.env.example` to `.env` and fill `BOT_IDENTITY`, the matching token (`BOT_TOKEN` or `BRAINEXE_BOT_TOKEN`), `ADMIN_IDS`, `CHANNEL_ID`.
 2. Install deps: `pip install -r requirements.txt`
 3. Run: `python -m bot.main` (polling) or set `WEBHOOK_URL` for webhook mode.
 4. Docker: `docker-compose up`
+
+## Bot profiles
+- `BOT_IDENTITY=mrdiy` (default) uses `BOT_TOKEN`.
+- `BOT_IDENTITY=brainexe` uses `BRAINEXE_BOT_TOKEN` only.
+- A missing token for the selected profile, or an invalid `BOT_IDENTITY`, stops startup with a configuration error. The selected profile never falls back to the other token.
+- Verify the selection without starting the bot: `python -c "from bot.config import get_settings; print(get_settings().bot_identity_summary)"`.
 
 Optional access and retention settings:
 - `ACCESS_DEFAULT_DAYS` — default approval duration. `0` keeps lifetime access; `1`/`2` gives 24/48-hour access. Explicit `/approveuser <id> <days>` overrides it.
@@ -202,6 +210,36 @@ The startup migrations are additive and idempotent. They never delete uploads, b
 5. If using polling: set service type to Worker (no HTTP port/health check).
 6. If using webhook: set `WEBHOOK_URL` to your Northflank public URL and keep health check at `/health`.
 7. Deploy and check logs for "DB initialized" and polling start.
+
+## Brain.exe cutover on the existing Northflank service
+Use one service and one replica. Do not create a second production service.
+
+Change or add only:
+- `BOT_IDENTITY=brainexe`
+- `BRAINEXE_BOT_TOKEN=<Brain.exe token from BotFather>`
+
+Keep the existing `BOT_TOKEN` stored securely as the MR.DIY rollback token. Keep `ADMIN_IDS`, `DATABASE_URL`, `CHANNEL_ID`, `UPLOAD_INBOX_CHAT_ID`, `DESTINATION_GROUP_ID`, `ACCESS_GROUP_ID`, `ACCESS_INVITE_TTL_MINUTES`, `WEBHOOK_SECRET`, `PORT`, `HOST`, premium/Razorpay settings, retention settings, and reminder/digest settings unchanged. Leave the service type, start command, and health-check path unchanged.
+
+Before cutover:
+1. Back up the production database.
+2. Add Brain.exe to Med Lounge as an administrator with **Invite Users** permission.
+3. Add Brain.exe to the existing upload inbox and disable BotFather privacy so it can read forwarded videos.
+4. Confirm Brain.exe can access the existing lecture source channel and destination group/topics.
+
+Cutover:
+1. Set `BOT_IDENTITY=brainexe` and add `BRAINEXE_BOT_TOKEN` in Northflank.
+2. Restart the single service.
+3. Confirm startup logs show `profile=brainexe display_name=Brain.exe token_source=BRAINEXE_BOT_TOKEN`, then `DB initialized` and the access-group configuration.
+4. Test `/start`, `/myaccess`, an existing approved student, a new invitation, the upload inbox, and a non-production publishing check.
+
+Rollback:
+1. Stop the single Brain.exe service/replica (scale to zero).
+2. Set `BOT_IDENTITY=mrdiy` (or remove it; MR.DIY remains the default).
+3. Confirm the existing `BOT_TOKEN` still contains the MR.DIY token.
+4. Restart the same service.
+5. Confirm startup logs show `profile=mrdiy display_name=MR.DIY token_source=BOT_TOKEN` and MR.DIY responds to `/start`.
+
+Do not delete the Brain.exe token, existing Med Lounge members, old invitations, database records, or either bot's BotFather configuration during rollback.
 
 ## Free hosting alternatives
 Koyeb/Fly.io via webhook; Oracle Cloud Always Free VM with polling.

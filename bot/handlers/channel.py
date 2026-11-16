@@ -36,6 +36,15 @@ def is_stale_join(event: ChatMemberUpdated, now: datetime | None = None) -> bool
     return now - when > STALE_JOIN_AFTER
 
 
+def dm_welcome_text(settings, user) -> str:
+    return (
+        f"👋 Welcome {user.full_name or user.first_name}!\n\n"
+        f"{settings.bot_brand_emoji} {settings.bot_display_name} is online — "
+        f"{settings.bot_tagline}\n"
+        "Tap below to browse subjects, track progress and unlock premium."
+    )
+
+
 @router.chat_member(ChatMemberUpdatedFilter(member_status_changed=MEMBER))
 async def on_new_member(event: ChatMemberUpdated):
     if is_stale_join(event):
@@ -57,11 +66,7 @@ async def on_new_member(event: ChatMemberUpdated):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Open Bot", url=f"https://t.me/{(await event.bot.get_me()).username}")],
     ])
-    welcome_text = (
-        f"👋 Welcome {user.full_name or user.first_name}!\n\n"
-        "🎓 FMGE Lecture Bot is here to help you crack FMGE.\n"
-        "Tap below to browse subjects, track progress and unlock premium."
-    )
+    welcome_text = dm_welcome_text(settings, user)
     try:
         if event.chat.type in ("group", "supergroup"):
             await event.bot.send_message(event.chat.id, f"👋 Welcome {user.full_name or user.first_name} to the community!", reply_markup=kb)
